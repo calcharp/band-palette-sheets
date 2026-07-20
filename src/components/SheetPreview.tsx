@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { simplifyPalette, type ClusterReduce } from '../lib/imagePalette'
 import { normalizeHex, parseHex, sortColors, type ColorSortKey } from '../lib/palette'
 import {
   cellAtPoint,
@@ -10,6 +11,8 @@ import {
   type Rect,
 } from '../lib/render'
 import type { Palette, SheetLayout } from '../types'
+import { ColorPanel } from './ColorPanel'
+import { PalettePanel } from './PalettePanel'
 
 interface SheetPreviewProps {
   palettes: Palette[]
@@ -65,22 +68,53 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
   const [edit, setEdit] = useState<ActiveEdit | null>(null)
   const [displayScale, setDisplayScale] = useState(1)
   const [hits, setHits] = useState<PaletteHit[]>([])
-  const [hoverId, setHoverId] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sortState, setSortState] = useState<
     Record<string, { key: ColorSortKey; dir: 1 | -1 }>
   >({})
+  const [simplifyLive, setSimplifyLive] = useState(false)
+  const [simplifyK, setSimplifyK] = useState(4)
+  const [simplifyReduce, setSimplifyReduce] = useState<ClusterReduce>('mean')
 
   editRef.current = edit
   dragRef.current = drag
 
+  const displayPalettes = useMemo(() => {
+    let next = palettes
+
+    if (edit?.kind === 'color') {
+      const hex = parseHex(edit.value)
+      if (hex) {
+        next = next.map((p) => {
+          if (p.id !== edit.paletteId) return p
+          const colors = [...p.colors]
+          if (edit.colorIndex >= colors.length) return p
+          colors[edit.colorIndex] = hex
+          return { ...p, colors }
+        })
+      }
+    }
+
+    if (selectedId && simplifyLive) {
+      const source = palettes.find((p) => p.id === selectedId)
+      if (source && source.colors.length >= 2) {
+        const k = Math.max(1, Math.min(simplifyK, source.colors.length - 1))
+        const colors = simplifyPalette(source.colors, k, simplifyReduce)
+        next = next.map((p) => (p.id === selectedId ? { ...p, colors } : p))
+      }
+    }
+
+    return next
+  }, [palettes, edit, selectedId, simplifyLive, simplifyK, simplifyReduce])
+
   useEffect(() => {
     const host = canvasRef.current
     if (!host) return
-    const info = computeSheetHits(palettes, layout)
+    const info = computeSheetHits(displayPalettes, layout)
     setHits(info.hits)
 
-    const sheet = renderSheet(palettes, layout, 1)
+    const sheet = renderSheet(displayPalettes, layout, 1)
     host.width = sheet.width
     host.height = sheet.height
     const ctx = host.getContext('2d')
@@ -113,10 +147,17 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
           ctx.setLineDash([])
         }
       }
+    } else if (selectedId) {
+      const sel = info.hits.find((h) => h.paletteId === selectedId)
+      if (sel) {
+        ctx.strokeStyle = 'rgba(15, 118, 110, 0.7)'
+        ctx.lineWidth = 2
+        ctx.strokeRect(sel.cell.x + 1, sel.cell.y + 1, sel.cell.w - 2, sel.cell.h - 2)
+      }
     }
 
     updateScale()
-  }, [palettes, layout, drag?.overId, drag?.paletteId])
+  }, [displayPalettes, layout, drag?.overId, drag?.paletteId, selectedId])
 
   useEffect(() => {
     const frame = frameRef.current
@@ -127,15 +168,11 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
   }, [])
 
   useEffect(() => {
-    if (edit) inputRef.current?.select()
-  }, [
-    edit?.kind,
-    edit && 'paletteId' in edit ? edit.paletteId : null,
-    edit && edit.kind === 'color' ? edit.colorIndex : null,
-  ])
+    if (edit?.kind === 'name') inputRef.current?.select()
+  }, [edit?.kind, edit && edit.kind === 'name' ? edit.paletteId : null])
 
   useEffect(() => {
-    if (!edit) return
+    if (!edit || edit.kind !== 'name') return
     function onPointerDown(e: PointerEvent) {
       const node = editorRef.current
       if (node && !node.contains(e.target as Node)) commitEdit()
@@ -174,8 +211,8 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
             offsetY: pending.offsetY,
           }
           pendingDrag.current = null
+          if (editRef.current?.kind === 'color') commitEdit()
           setDrag(next)
-          setHoverId(null)
           setEdit(null)
         }
         return
@@ -184,7 +221,7 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
       const d = dragRef.current
       if (!d) return
       const pt = clientToSheet(e.clientX, e.clientY)
-      const over = pt ? cellAtPoint(pt.x, pt.y, palettes, layout) : null
+      const over = pt ? cellAtPoint(pt.x, pt.y, displayPalettes, layout) : null
       setDrag({
         ...d,
         pointerX: e.clientX,
@@ -194,14 +231,17 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
     }
 
     function onUp() {
+      const pending = pendingDrag.current
       const d = dragRef.current
       pendingDrag.current = null
       if (d) {
         if (d.overId && d.overId !== d.paletteId) {
-          onPalettesChange(movePalette(palettes, d.paletteId, d.overId))
+          onPalettesChange(movePalette(displayPalettes, d.paletteId, d.overId))
         }
         setDrag(null)
+        return
       }
+      if (pending) selectPalette(pending.paletteId)
     }
 
     window.addEventListener('pointermove', onMove)
@@ -212,7 +252,7 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
     }
-  }, [palettes, layout, onPalettesChange])
+  }, [displayPalettes, layout, onPalettesChange])
 
   function updateScale() {
     const host = canvasRef.current
@@ -302,10 +342,10 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
   }
 
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (e.button !== 0 || edit) return
+    if (e.button !== 0 || edit?.kind === 'name') return
     const pt = sheetPoint(e)
     if (!pt) return
-    const cell = cellAtPoint(pt.x, pt.y, palettes, layout)
+    const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout)
     if (!cell) return
     pendingDrag.current = {
       paletteId: cell.paletteId,
@@ -317,27 +357,17 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
     }
   }
 
-  function onPointerMoveHover(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (drag || pendingDrag.current) return
-    const pt = sheetPoint(e)
-    if (!pt) {
-      setHoverId(null)
-      return
-    }
-    const cell = cellAtPoint(pt.x, pt.y, palettes, layout)
-    setHoverId(cell?.paletteId ?? null)
-  }
-
   function onDoubleClick(e: React.MouseEvent<HTMLCanvasElement>) {
     pendingDrag.current = null
     const pt = sheetPoint(e)
     if (!pt) return
-    const hit = hitTest(pt.x, pt.y, palettes, layout)
+    const hit = hitTest(pt.x, pt.y, displayPalettes, layout)
     if (!hit) return
     e.preventDefault()
 
     if (hit.kind === 'name') {
-      const pal = palettes.find((p) => p.id === hit.paletteId)
+      if (edit?.kind === 'color') commitEdit()
+      const pal = displayPalettes.find((p) => p.id === hit.paletteId)
       setEdit({
         kind: 'name',
         paletteId: hit.paletteId,
@@ -359,7 +389,7 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
     }
 
     let newIndex = 0
-    const nextPalettes = palettes.map((p) => {
+    const nextPalettes = displayPalettes.map((p) => {
       if (p.id !== hit.paletteId) return p
       newIndex = p.colors.length
       return { ...p, colors: [...p.colors, '#000000'] }
@@ -379,7 +409,18 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
     })
   }
 
+  function selectPalette(id: string) {
+    const pal = palettes.find((p) => p.id === id)
+    setSelectedId(id)
+    setSimplifyLive(false)
+    if (pal) {
+      setSimplifyK(Math.max(1, Math.min(4, pal.colors.length - 1)))
+      setSimplifyReduce('mean')
+    }
+  }
+
   function sortPalette(id: string, key: ColorSortKey) {
+    setSimplifyLive(false)
     const prev = sortState[id]
     const dir: 1 | -1 = prev?.key === key ? (prev.dir === 1 ? -1 : 1) : 1
     setSortState((s) => ({ ...s, [id]: { key, dir } }))
@@ -393,172 +434,138 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
   function removePalette(id: string) {
     if (palettes.length <= 1) return
     onPalettesChange(palettes.filter((p) => p.id !== id))
-    setHoverId(null)
+    if (selectedId === id) {
+      setSelectedId(null)
+      setSimplifyLive(false)
+    }
+  }
+
+  function applySimplify(id: string) {
+    const pal = palettes.find((p) => p.id === id)
+    if (!pal || pal.colors.length < 2) return
+    const k = Math.max(1, Math.min(simplifyK, pal.colors.length - 1))
+    const next = simplifyPalette(pal.colors, k, simplifyReduce)
+    onPalettesChange(palettes.map((p) => (p.id === id ? { ...p, colors: next } : p)))
+    setSimplifyLive(false)
+  }
+
+  function resetSimplify() {
+    setSimplifyLive(false)
+    const pal = selectedId ? palettes.find((p) => p.id === selectedId) : null
+    if (pal) setSimplifyK(Math.max(1, Math.min(4, pal.colors.length - 1)))
+    setSimplifyReduce('mean')
   }
 
   const editStyle =
-    edit && displayScale > 0
-      ? edit.kind === 'name'
-        ? {
-            left: (edit.box.x + edit.box.w / 2) * displayScale,
-            top: edit.box.y * displayScale,
-            minWidth: Math.max(edit.box.w * displayScale, 72),
-            transform: 'translate(-50%, -2px)',
-          }
-        : {
-            left: edit.box.x * displayScale,
-            top: edit.box.y * displayScale,
-            minWidth: Math.max(edit.box.w * displayScale, 132),
-          }
+    edit && edit.kind === 'name' && displayScale > 0
+      ? {
+          left: (edit.box.x + edit.box.w / 2) * displayScale,
+          top: edit.box.y * displayScale,
+          minWidth: Math.max(edit.box.w * displayScale, 72),
+          transform: 'translate(-50%, -2px)',
+        }
       : undefined
 
-  const hoverHit = hoverId && !drag ? hits.find((h) => h.paletteId === hoverId) : null
+  const colorEdit = edit?.kind === 'color' ? edit : null
+  const colorPal = colorEdit
+    ? displayPalettes.find((p) => p.id === colorEdit.paletteId)
+    : null
+
+  const selectedSource = selectedId ? palettes.find((p) => p.id === selectedId) : null
+  const selectedDisplay = selectedId
+    ? displayPalettes.find((p) => p.id === selectedId)
+    : null
+
   const dragHit = drag ? hits.find((h) => h.paletteId === drag.paletteId) : null
   const swapPalette =
     drag && drag.overId && drag.overId !== drag.paletteId
-      ? palettes.find((p) => p.id === drag.overId)
+      ? displayPalettes.find((p) => p.id === drag.overId)
       : null
   const frameRect = frameRef.current?.getBoundingClientRect()
-  const chromeLift = 44
 
   return (
-    <div className="preview">
+    <>
+      {colorEdit && colorPal && (
+        <ColorPanel
+          hex={colorEdit.value}
+          paletteName={colorPal.name}
+          colorIndex={colorEdit.colorIndex}
+          canDelete={colorPal.colors.length > 1}
+          onChange={(hex) => setEdit({ ...colorEdit, value: hex })}
+          onClose={() => commitEdit()}
+          onInsertAbove={() => insertColor('above')}
+          onInsertBelow={() => insertColor('below')}
+          onDelete={() => deleteColor()}
+        />
+      )}
+
+      {selectedSource && selectedDisplay && (
+        <PalettePanel
+          palette={selectedDisplay}
+          allPalettes={palettes}
+          sourceColorCount={selectedSource.colors.length}
+          previewColorCount={selectedDisplay.colors.length}
+          canDelete={palettes.length > 1}
+          sortState={sortState[selectedSource.id]}
+          simplifyK={simplifyK}
+          simplifyReduce={simplifyReduce}
+          simplifyLive={simplifyLive}
+          onSort={(key) => sortPalette(selectedSource.id, key)}
+          onSimplifyK={(k) => {
+            setSimplifyK(k)
+            setSimplifyLive(true)
+          }}
+          onSimplifyReduce={(m) => {
+            setSimplifyReduce(m)
+            setSimplifyLive(true)
+          }}
+          onApplySimplify={() => applySimplify(selectedSource.id)}
+          onResetSimplify={resetSimplify}
+          onAddMixedColor={(hex) => {
+            setSimplifyLive(false)
+            onPalettesChange(
+              palettes.map((p) =>
+                p.id === selectedSource.id ? { ...p, colors: [...p.colors, hex] } : p,
+              ),
+            )
+          }}
+          onDelete={() => removePalette(selectedSource.id)}
+          onClose={() => {
+            setSelectedId(null)
+            setSimplifyLive(false)
+          }}
+        />
+      )}
+
+    <div
+      className={`preview ${colorEdit ? 'preview--with-panel' : ''} ${
+        selectedSource ? 'preview--with-palette-panel' : ''
+      }`}
+    >
       <p className="preview__hint">
-        Drag to rearrange · double-click to edit · Ctrl+Z to undo
+        Click a palette for tools · drag to rearrange · double-click to edit · Ctrl+Z to undo
       </p>
       <div className="preview__frame" ref={frameRef}>
         <canvas
           ref={canvasRef}
           className={`preview__canvas ${drag ? 'preview__canvas--dragging' : ''}`}
           onPointerDown={onPointerDown}
-          onPointerMove={onPointerMoveHover}
-          onPointerLeave={(e) => {
-            if (drag) return
-            const next = e.relatedTarget as Node | null
-            if (next && (e.currentTarget.parentElement?.querySelector('.palette-chrome')?.contains(next))) {
-              return
-            }
-            setHoverId(null)
-          }}
           onDoubleClick={onDoubleClick}
         />
 
-        {hoverHit && displayScale > 0 && (
-          <div
-            className="palette-chrome"
-            style={{
-              left: hoverHit.cell.x * displayScale,
-              top: hoverHit.cell.y * displayScale - chromeLift,
-              width: hoverHit.cell.w * displayScale,
-              height: hoverHit.cell.h * displayScale + chromeLift,
-            }}
-            onPointerEnter={() => setHoverId(hoverHit.paletteId)}
-            onPointerLeave={(e) => {
-              const next = e.relatedTarget as Node | null
-              if (next && canvasRef.current?.contains(next)) return
-              setHoverId(null)
-            }}
-          >
-            <div className="palette-chrome__hit">
-              <div className="palette-chrome__bar">
-                <span className="palette-chrome__label">Sort</span>
-                {(
-                  [
-                    ['hue', 'Hue'],
-                    ['saturation', 'Sat'],
-                    ['brightness', 'Bright'],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`chip chip--compact ${
-                      sortState[hoverHit.paletteId]?.key === key ? 'chip--on' : ''
-                    }`}
-                    onClick={() => sortPalette(hoverHit.paletteId, key)}
-                  >
-                    {label}
-                    {sortState[hoverHit.paletteId]?.key === key
-                      ? sortState[hoverHit.paletteId].dir === 1
-                        ? ' ↑'
-                        : ' ↓'
-                      : ''}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  className="icon-btn icon-btn--tiny"
-                  disabled={palettes.length <= 1}
-                  onClick={() => removePalette(hoverHit.paletteId)}
-                  aria-label="Remove palette"
-                >
-                  ×
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {edit && editStyle && (
+        {edit?.kind === 'name' && editStyle && (
           <div
             ref={editorRef}
-            className={`preview__editor preview__editor--${edit.kind}`}
+            className="preview__editor preview__editor--name"
             style={editStyle}
           >
-            {edit.kind === 'name' ? (
-              <input
-                ref={inputRef}
-                className="preview__name-input"
-                value={edit.value}
-                onChange={(e) => setEdit({ ...edit, value: e.target.value })}
-                aria-label="Palette name"
-              />
-            ) : (
-              <div className="preview__color-edit">
-                <input
-                  type="color"
-                  value={parseHex(edit.value) ?? '#000000'}
-                  onChange={(e) =>
-                    setEdit({ ...edit, value: e.target.value.toUpperCase() })
-                  }
-                  aria-label="Pick color"
-                />
-                <input
-                  ref={inputRef}
-                  className="preview__hex-input"
-                  value={edit.value}
-                  spellCheck={false}
-                  onChange={(e) => setEdit({ ...edit, value: e.target.value })}
-                  aria-label="Hex color"
-                />
-                <div className="preview__color-insert" role="group" aria-label="Insert color">
-                  <button
-                    type="button"
-                    className="chip chip--compact"
-                    onClick={() => insertColor('above')}
-                  >
-                    + Above
-                  </button>
-                  <button
-                    type="button"
-                    className="chip chip--compact"
-                    onClick={() => insertColor('below')}
-                  >
-                    + Below
-                  </button>
-                  <button
-                    type="button"
-                    className="chip chip--compact chip--danger"
-                    disabled={
-                      (palettes.find((p) => p.id === edit.paletteId)?.colors.length ?? 0) <= 1
-                    }
-                    onClick={() => deleteColor()}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            )}
+            <input
+              ref={inputRef}
+              className="preview__name-input"
+              value={edit.value}
+              onChange={(e) => setEdit({ ...edit, value: e.target.value })}
+              aria-label="Palette name"
+            />
           </div>
         )}
 
@@ -587,13 +594,14 @@ export function SheetPreview({ palettes, layout, onPalettesChange }: SheetPrevie
             }}
           >
             <DragGhostCanvas
-              palette={palettes.find((p) => p.id === drag.paletteId)!}
+              palette={displayPalettes.find((p) => p.id === drag.paletteId)!}
               layout={layout}
             />
           </div>
         )}
       </div>
     </div>
+    </>
   )
 }
 

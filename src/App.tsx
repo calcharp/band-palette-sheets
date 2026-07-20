@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { FromImageModal } from './components/FromImageModal'
 import { SheetPreview } from './components/SheetPreview'
 import { Toolbar } from './components/Toolbar'
 import { useHistory } from './lib/history'
@@ -22,6 +24,7 @@ export default function App() {
     layout: DEFAULT_LAYOUT,
   })
   const { palettes, layout } = present
+  const [fromImageOpen, setFromImageOpen] = useState(false)
 
   function handleExport() {
     const canvas = renderSheet(palettes, layout, 2)
@@ -40,6 +43,7 @@ export default function App() {
             palettes: [...d.palettes, createPalette(`Palette ${d.palettes.length + 1}`)],
           }))
         }
+        onFromImage={() => setFromImageOpen(true)}
         onExport={handleExport}
       />
       <main className="workspace">
@@ -51,6 +55,12 @@ export default function App() {
           />
         </div>
       </main>
+
+      <FromImageModal
+        open={fromImageOpen}
+        onClose={() => setFromImageOpen(false)}
+        onAdd={(palette) => set((d) => ({ ...d, palettes: [...d.palettes, palette] }))}
+      />
     </div>
   )
 }

@@ -25,6 +25,8 @@ export interface SheetLayout {
   padding: number
   /** Background behind the sheet. */
   background: string
+  /** Draw hex codes on each color band. */
+  showHexLabels: boolean
 }
 
 export const DEFAULT_LAYOUT: SheetLayout = {
@@ -37,4 +39,5 @@ export const DEFAULT_LAYOUT: SheetLayout = {
   nameGap: 10,
   padding: 48,
   background: '#f4f0e8',
+  showHexLabels: true,
 }

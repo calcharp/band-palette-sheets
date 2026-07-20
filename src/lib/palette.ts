@@ -50,6 +50,43 @@ export function hexToHsb(hex: string): { h: number; s: number; b: number } {
   return { h, s, b: max }
 }
 
+/** HSB (H 0–360, S/B 0–1) → #RRGGBB. */
+export function hsbToHex(h: number, s: number, b: number): string {
+  const hh = ((h % 360) + 360) % 360
+  const ss = Math.min(1, Math.max(0, s))
+  const vv = Math.min(1, Math.max(0, b))
+  const c = vv * ss
+  const x = c * (1 - Math.abs(((hh / 60) % 2) - 1))
+  const m = vv - c
+  let rp = 0
+  let gp = 0
+  let bp = 0
+  if (hh < 60) {
+    rp = c
+    gp = x
+  } else if (hh < 120) {
+    rp = x
+    gp = c
+  } else if (hh < 180) {
+    gp = c
+    bp = x
+  } else if (hh < 240) {
+    gp = x
+    bp = c
+  } else if (hh < 300) {
+    rp = x
+    bp = c
+  } else {
+    rp = c
+    bp = x
+  }
+  const toByte = (n: number) =>
+    Math.round((n + m) * 255)
+      .toString(16)
+      .padStart(2, '0')
+  return `#${toByte(rp)}${toByte(gp)}${toByte(bp)}`.toUpperCase()
+}
+
 export function sortColors(
   colors: string[],
   key: ColorSortKey,

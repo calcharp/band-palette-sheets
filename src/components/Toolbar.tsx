@@ -7,6 +7,7 @@ interface ToolbarProps {
   paletteCount: number
   onLayoutChange: (layout: SheetLayout) => void
   onAddPalette: () => void
+  onFromImage: () => void
   onExport: () => void
 }
 
@@ -15,6 +16,7 @@ export function Toolbar({
   paletteCount,
   onLayoutChange,
   onAddPalette,
+  onFromImage,
   onExport,
 }: ToolbarProps) {
   const [open, setOpen] = useState(false)
@@ -45,6 +47,9 @@ export function Toolbar({
       <div className="toolbar__actions">
         <button type="button" className="btn btn--ghost btn--small" onClick={onAddPalette}>
           + Palette
+        </button>
+        <button type="button" className="btn btn--ghost btn--small" onClick={onFromImage}>
+          From image
         </button>
 
         <div className="toolbar__layout" ref={panelRef}>
@@ -138,6 +143,15 @@ export function Toolbar({
                 value={layout.padding}
                 onChange={(padding) => patch({ padding })}
               />
+
+              <label className="field field--check">
+                <span>Hex labels on bands</span>
+                <input
+                  type="checkbox"
+                  checked={layout.showHexLabels !== false}
+                  onChange={(e) => patch({ showHexLabels: e.target.checked })}
+                />
+              </label>
 
               <label className="field">
                 <span>Background</span>

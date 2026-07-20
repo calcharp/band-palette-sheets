@@ -4,6 +4,26 @@ import type { NamePosition, Palette, SheetLayout } from '../types'
 export const NAME_FONT = '600 18px "DM Sans", sans-serif'
 const NAME_COLOR = '#1c1917'
 
+/** Relative luminance 0–1 (sRGB). */
+function relativeLuminance(hex: string): number {
+  const n = hex.replace('#', '')
+  const full =
+    n.length === 3 ? `${n[0]}${n[0]}${n[1]}${n[1]}${n[2]}${n[2]}` : n
+  const channel = (i: number) => {
+    const c = parseInt(full.slice(i, i + 2), 16) / 255
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+  }
+  const r = channel(0)
+  const g = channel(2)
+  const b = channel(4)
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/** Black or white text for maximum contrast on `hex` background. */
+export function contrastInk(hex: string): string {
+  return relativeLuminance(hex) > 0.45 ? '#1c1917' : '#fafaf9'
+}
+
 export interface Rect {
   x: number
   y: number
@@ -130,13 +150,22 @@ function drawPalette(
 
   const colors = palette.colors.length ? palette.colors : ['#cccccc']
   colors.forEach((hex, i) => {
+    const y = originY + off.stripeY + i * layout.bandHeight
+    const x = originX + off.stripeX
     ctx.fillStyle = hex
-    ctx.fillRect(
-      originX + off.stripeX,
-      originY + off.stripeY + i * layout.bandHeight,
-      layout.bandWidth,
-      layout.bandHeight,
-    )
+    ctx.fillRect(x, y, layout.bandWidth, layout.bandHeight)
+
+    if (layout.showHexLabels !== false && layout.bandHeight >= 14) {
+      const label = hex.toUpperCase().startsWith('#') ? hex.toUpperCase() : `#${hex.toUpperCase()}`
+      const fontSize = Math.max(9, Math.min(12, Math.floor(layout.bandHeight * 0.42)))
+      ctx.font = `500 ${fontSize}px "IBM Plex Mono", monospace`
+      ctx.fillStyle = contrastInk(hex)
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(label, x + layout.bandWidth / 2, y + layout.bandHeight / 2)
+      ctx.textAlign = 'start'
+      ctx.textBaseline = 'alphabetic'
+    }
   })
 }
 
