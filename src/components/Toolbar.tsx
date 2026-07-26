@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { parseHex } from '../lib/palette'
 import type { LibraryEntry } from '../lib/library'
+import type { HistoryCommitOpts } from '../lib/history'
 import type { NamePosition, Palette, SheetLayout } from '../types'
 import { JsonPanel } from './JsonPanel'
 import { LibraryPanel } from './LibraryPanel'
@@ -13,7 +14,10 @@ interface ToolbarProps {
   onSelectPalette: (id: string | null) => void
   onTitleChange: (title: string) => void
   onLayoutChange: (layout: SheetLayout) => void
-  onPalettesChange: (palettes: Palette[]) => void
+  onPalettesChange: (
+    palettes: Palette[] | ((prev: Palette[]) => Palette[]),
+    opts?: HistoryCommitOpts,
+  ) => void
   onSave: () => void
   saveBusy?: boolean
   onEditSlot: (el: HTMLDivElement | null) => void

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { HistoryCommitOpts } from '../lib/history'
 import { createPalette, parseHex } from '../lib/palette'
 import { serializeSheetDocument } from '../lib/pngMeta'
 import {
@@ -14,7 +15,10 @@ interface JsonPanelProps {
   palettes: Palette[]
   onTitleChange: (title: string) => void
   onLayoutChange: (layout: SheetLayout) => void
-  onPalettesChange: (palettes: Palette[]) => void
+  onPalettesChange: (
+    palettes: Palette[] | ((prev: Palette[]) => Palette[]),
+    opts?: HistoryCommitOpts,
+  ) => void
 }
 
 const NAME_POSITIONS: NamePosition[] = ['above', 'below', 'left', 'right']

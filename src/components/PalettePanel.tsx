@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ClusterReduce } from '../lib/imagePalette'
-import { parseHex } from '../lib/palette'
+import { PALETTER_COLOR_MIME, parseHex } from '../lib/palette'
 import type { ColorSortKey } from '../lib/palette'
 import { contrastInk } from '../lib/render'
 import type { Palette } from '../types'
@@ -196,9 +196,8 @@ export function PalettePanel({
                   isDragged && dragMoved.current ? ' palette-panel__swatch-row--slot' : ''
                 }`}
                 role="listitem"
-                draggable={Boolean(onReorderColors) && palette.colors.length > 1}
+                draggable
                 onDragStart={(e) => {
-                  if (!onReorderColors) return
                   dragMoved.current = false
                   const rect = e.currentTarget.getBoundingClientRect()
                   dragOffset.current = {
@@ -209,8 +208,9 @@ export function PalettePanel({
                   setDragFrom(src)
                   setDragOrder(palette.colors.map((_, i) => i))
                   setDragPointer({ x: e.clientX, y: e.clientY })
-                  e.dataTransfer.effectAllowed = 'move'
-                  e.dataTransfer.setData('text/plain', String(src))
+                  e.dataTransfer.effectAllowed = onReorderColors ? 'copyMove' : 'copy'
+                  e.dataTransfer.setData(PALETTER_COLOR_MIME, hex)
+                  e.dataTransfer.setData('text/plain', hex)
                   const blank = document.createElement('canvas')
                   blank.width = 1
                   blank.height = 1
@@ -218,11 +218,13 @@ export function PalettePanel({
                 }}
                 onDrag={(e) => {
                   if (e.clientX === 0 && e.clientY === 0) return
+                  dragMoved.current = true
                   setDragPointer({ x: e.clientX, y: e.clientY })
                 }}
                 onDragEnd={() => clearDrag()}
                 onDragOver={(e) => {
                   if (dragFrom === null || !onReorderColors || !dragOrder) return
+                  if (palette.colors.length < 2) return
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
                   const fromPos = dragOrder.indexOf(dragFrom)
@@ -324,6 +326,29 @@ export function PalettePanel({
             </div>
           )}
         </div>
+      ) : null}
+
+      {embedded ? (
+        <details className="side-panel__fold palette-panel__add-fold">
+          <summary className="side-panel__fold-sum">
+            <span>Add color</span>
+            <span className="side-panel__fold-caret" aria-hidden />
+          </summary>
+          <div className="side-panel__fold-body palette-panel__add">
+            <p className="palette-panel__help">
+              Pick any color and append it to this palette
+              {hasSourceImage ? ' (works alongside image picks).' : '.'}
+            </p>
+            <ColorPicker value={draft} onChange={setDraft} />
+            <button
+              type="button"
+              className="btn btn--primary btn--small"
+              onClick={() => onAddMixedColor(parseHex(draft) ?? draft)}
+            >
+              Add to palette
+            </button>
+          </div>
+        </details>
       ) : (
         <>
           <section className="palette-panel__section">

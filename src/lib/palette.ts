@@ -1,5 +1,8 @@
 import type { Palette, SheetLayout } from '../types'
 
+/** HTML5 DnD payload for dragging a hex from the Edit panel onto a sheet palette. */
+export const PALETTER_COLOR_MIME = 'application/x-paletter-color'
+
 export function uid(prefix = 'id'): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}`
 }

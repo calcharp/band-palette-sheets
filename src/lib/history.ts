@@ -6,6 +6,16 @@ export interface HistoryStack<T> {
   present: T
   past: T[]
   future: T[]
+  /** When set, the next commit with the same key replaces `present` instead of pushing. */
+  coalesceKey?: string
+}
+
+export type HistoryCommitOpts = {
+  /**
+   * Group rapid edits (e.g. dragging a color) into one undo step.
+   * Matching key replaces the current present without growing `past`.
+   */
+  coalesce?: string
 }
 
 export function createHistoryStack<T>(initial: T): HistoryStack<T> {
@@ -15,15 +25,29 @@ export function createHistoryStack<T>(initial: T): HistoryStack<T> {
 export function historyCommit<T>(
   stack: HistoryStack<T>,
   next: T | ((prev: T) => T),
+  opts?: HistoryCommitOpts,
 ): HistoryStack<T> {
   const value =
     typeof next === 'function' ? (next as (p: T) => T)(stack.present) : next
+  if (value === stack.present) return stack
+
+  const key = opts?.coalesce
+
+  if (key && stack.coalesceKey === key) {
+    return {
+      ...stack,
+      present: value,
+      coalesceKey: key,
+    }
+  }
+
   const past = [...stack.past, structuredClone(stack.present) as T]
   if (past.length > MAX_HISTORY) past.shift()
   return {
     present: value,
     past,
     future: [],
+    coalesceKey: key,
   }
 }
 
@@ -78,8 +102,8 @@ export function useHistory<T>(initial: T) {
 
   return {
     present: stack.present,
-    set: (next: T | ((prev: T) => T)) => {
-      setStack((s) => historyCommit(s, next))
+    set: (next: T | ((prev: T) => T), opts?: HistoryCommitOpts) => {
+      setStack((s) => historyCommit(s, next, opts))
     },
     undo: () => {
       let ok = false

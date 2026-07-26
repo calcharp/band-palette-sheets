@@ -24,7 +24,7 @@ export async function tryImportPaletteSheetPng(blob: Blob): Promise<ImportedShee
     return null
   }
   const embedded = await readSheetMetaFromPng(blob)
-  if (!embedded) return null
+  if (!embedded?.palettes.length) return null
   return {
     palettes: embedded.palettes,
     layout: embedded.layout,

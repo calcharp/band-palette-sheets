@@ -15,6 +15,7 @@ import {
   historyRedo,
   historyUndo,
   useHistoryKeyboard,
+  type HistoryCommitOpts,
   type HistoryStack,
 } from './lib/history'
 import { tryImportPaletteSheetPng, diagnosePaletteSheetPng } from './lib/importSheet'
@@ -130,15 +131,15 @@ export default function App() {
   const [importError, setImportError] = useState<string | null>(null)
   const [toastTone, setToastTone] = useState<'warn' | 'error'>('error')
   const [libraryTabActive, setLibraryTabActive] = useState(false)
+  /** Bumps on undo/redo so editors drop ephemeral overlays. */
+  const [historyGen, setHistoryGen] = useState(0)
   const importInputRef = useRef<HTMLInputElement>(null)
   const fromImageOpenRef = useRef(false)
   const sheetActiveRef = useRef(false)
   const importPngRef = useRef<(file: File, sourcePath?: string) => Promise<void>>(
     async () => {},
   )
-  const openPastedInFromImageRef = useRef<
-    (file: File, sourcePath: string) => Promise<void>
-  >(async () => {})
+  const tryApplySheetMetaRef = useRef<(file: File) => Promise<boolean>>(async () => false)
   const sheetsRef = useRef(sheets)
   const activeSheetIdRef = useRef(activeSheetId)
   sheetsRef.current = sheets
@@ -160,9 +161,15 @@ export default function App() {
     [],
   )
 
-  const set = useCallback((next: DocState | ((prev: DocState) => DocState)) => {
-    patchActiveHistory((history) => historyCommit(history, next))
-  }, [patchActiveHistory])
+  const set = useCallback(
+    (
+      next: DocState | ((prev: DocState) => DocState),
+      opts?: HistoryCommitOpts,
+    ) => {
+      patchActiveHistory((history) => historyCommit(history, next, opts))
+    },
+    [patchActiveHistory],
+  )
 
   useHistoryKeyboard({
     enabled: !libraryTabActive,
@@ -176,9 +183,11 @@ export default function App() {
     },
     undo: () => {
       patchActiveHistory((history) => historyUndo(history) ?? history)
+      setHistoryGen((n) => n + 1)
     },
     redo: () => {
       patchActiveHistory((history) => historyRedo(history) ?? history)
+      setHistoryGen((n) => n + 1)
     },
   })
 
@@ -295,14 +304,21 @@ export default function App() {
     }))
   }
 
+  /** True when the PNG had Paletter metadata and was merged into the sheet. */
+  async function tryApplySheetMeta(file: File): Promise<boolean> {
+    const sheet = await tryImportPaletteSheetPng(file)
+    if (!sheet) return false
+    setImportError(null)
+    applyImportedSheet(sheet)
+    setFromImageOpen(false)
+    setFromImageResume(null)
+    setFromImageSeed(null)
+    return true
+  }
+
   async function importPngFile(file: File, sourcePath?: string) {
     try {
-      const sheet = await tryImportPaletteSheetPng(file)
-      if (sheet) {
-        setImportError(null)
-        applyImportedSheet(sheet)
-        return
-      }
+      if (await tryApplySheetMeta(file)) return
       const seed = await imageDataForFromImage(file, sourcePath)
       setFromImageResume(null)
       setFromImageSeed(seed)
@@ -310,21 +326,6 @@ export default function App() {
     } catch (e) {
       showToast(
         e instanceof Error ? e.message : 'Could not import that image.',
-        'error',
-        4000,
-      )
-    }
-  }
-
-  async function openPastedInFromImage(file: File, sourcePath: string) {
-    try {
-      const seed = await imageDataForFromImage(file, sourcePath)
-      setFromImageResume(null)
-      setFromImageSeed(seed)
-      setFromImageOpen(true)
-    } catch (e) {
-      showToast(
-        e instanceof Error ? e.message : 'Could not read that image.',
         'error',
         4000,
       )
@@ -340,31 +341,15 @@ export default function App() {
   showToastRef.current = showToast
 
   importPngRef.current = importPngFile
-  openPastedInFromImageRef.current = openPastedInFromImage
+  tryApplySheetMetaRef.current = tryApplySheetMeta
 
   useEffect(() => {
     return attachImagePasteListeners({
       isFromImageOpen: () => fromImageOpenRef.current,
       isSheetActive: () => sheetActiveRef.current,
       onPathImage: (file, sourcePath) => {
-        if (fromImageOpenRef.current) {
-          void openPastedInFromImageRef.current(file, sourcePath)
-        } else {
-          void (async () => {
-            try {
-              const seed = await imageDataForFromImage(file, sourcePath)
-              setFromImageResume(null)
-              setFromImageSeed(seed)
-              setFromImageOpen(true)
-            } catch (e) {
-              showToastRef.current(
-                e instanceof Error ? e.message : 'Could not import that image.',
-                'error',
-                4000,
-              )
-            }
-          })()
-        }
+        // Always try embedded Paletter metadata first; plain images open From image.
+        void importPngRef.current(file, sourcePath)
       },
       onError: (message) => {
         showToastRef.current(message, 'error', 5000)
@@ -696,7 +681,15 @@ export default function App() {
         onSelectPalette={setSelectedId}
         onTitleChange={(next) => set((d) => ({ ...d, title: next }))}
         onLayoutChange={(next) => set((d) => ({ ...d, layout: next }))}
-        onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
+        onPalettesChange={(next, opts) =>
+          set(
+            (d) => ({
+              ...d,
+              palettes: typeof next === 'function' ? next(d.palettes) : next,
+            }),
+            opts,
+          )
+        }
         onSave={() => void handleSave()}
         saveBusy={saveBusy}
         onEditSlot={onEditSlot}
@@ -733,7 +726,15 @@ export default function App() {
             palettes={palettes}
             layout={layout}
             onTitleChange={(next) => set((d) => ({ ...d, title: next }))}
-            onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
+            onPalettesChange={(next, opts) =>
+              set(
+                (d) => ({
+                  ...d,
+                  palettes: typeof next === 'function' ? next(d.palettes) : next,
+                }),
+                opts,
+              )
+            }
             onAddPalette={() =>
               set((d) => ({
                 ...d,
@@ -750,6 +751,7 @@ export default function App() {
             selectedId={selectedId}
             onSelectedIdChange={setSelectedId}
             editSlot={editSlot}
+            historyGen={historyGen}
             onOpenSourceImage={openFromImageResume}
           />
         </div>
@@ -766,6 +768,7 @@ export default function App() {
         }}
         onSave={saveFromImage}
         onDropMissingPath={warnDropMissingPath}
+        onTryImportSheet={(file) => tryApplySheetMetaRef.current(file)}
       />
 
       {importError && (

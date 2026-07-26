@@ -1204,7 +1204,7 @@ button {
 
 .preview__canvas {
   display: block;
-  max-width: min(1100px, 100%);
+  max-width: min(1375px, 100%);
   width: auto;
   height: auto;
   border-radius: 0;
@@ -1761,6 +1761,27 @@ button {
   gap: 0.55rem;
 }
 
+.side-panel .palette-panel__add-fold {
+  margin-top: 0.15rem;
+}
+
+.side-panel .palette-panel__add {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.side-panel .palette-panel__add .btn {
+  width: 100%;
+}
+
+.side-panel .palette-panel__add .palette-panel__help {
+  margin: 0;
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.35;
+}
+
 .side-panel .palette-panel__simplify-methods {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1895,7 +1916,6 @@ button {
   margin: 0;
   border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  background: #1a1a1a;
   accent-color: #b0b0b0;
   appearance: none;
   -webkit-appearance: none;
@@ -1929,8 +1949,6 @@ button {
   padding: 0 0.35rem;
   border-radius: 0;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  background: #141414;
-  color: rgba(255, 255, 255, 0.78);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.7rem;
   font-weight: 600;
@@ -2292,6 +2310,21 @@ button {
   cursor: pointer;
 }
 
+.color-picker__bright input[type='range']::-webkit-slider-runnable-track,
+.color-picker__hsb input[type='range']::-webkit-slider-runnable-track {
+  height: 10px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.color-picker__bright input[type='range']::-moz-range-track,
+.color-picker__hsb input[type='range']::-moz-range-track {
+  height: 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+}
+
 .color-picker__bright input[type='range']::-webkit-slider-thumb,
 .color-picker__hsb input[type='range']::-webkit-slider-thumb {
   appearance: none;
@@ -2323,10 +2356,10 @@ button {
   width: 100%;
   padding: 0.4rem 0.5rem;
   border-radius: 8px;
-  border: 1px solid var(--line);
-  background: #fff;
+  border: 1px solid var(--line-strong);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.85rem;
+  font-weight: 600;
 }
 
 .color-picker__select {

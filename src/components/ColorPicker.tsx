@@ -1,5 +1,9 @@
 import { hexToHsb, hsbToHex, parseHex } from '../lib/palette'
+import { contrastInk } from '../lib/render'
 import { ColorWheel } from './ColorWheel'
+
+const HUE_GRADIENT =
+  'linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)'
 
 interface ColorPickerProps {
   value: string
@@ -11,6 +15,7 @@ interface ColorPickerProps {
 export function ColorPicker({ value, onChange, className = '' }: ColorPickerProps) {
   const valid = parseHex(value) ?? '#000000'
   const hsb = hexToHsb(valid)
+  const ink = contrastInk(valid)
 
   function setHsb(patch: Partial<{ h: number; s: number; b: number }>) {
     const next = { ...hsb, ...patch }
@@ -47,6 +52,7 @@ export function ColorPicker({ value, onChange, className = '' }: ColorPickerProp
               max={360}
               value={Math.round(hsb.h)}
               onChange={(e) => setHsb({ h: Number(e.target.value) })}
+              style={{ background: HUE_GRADIENT }}
               aria-label="Hue"
             />
             <em>{Math.round(hsb.h)}</em>
@@ -59,6 +65,9 @@ export function ColorPicker({ value, onChange, className = '' }: ColorPickerProp
               max={100}
               value={Math.round(hsb.s * 100)}
               onChange={(e) => setHsb({ s: Number(e.target.value) / 100 })}
+              style={{
+                background: `linear-gradient(to right, ${hsbToHex(hsb.h, 0, hsb.b)}, ${hsbToHex(hsb.h, 1, hsb.b)})`,
+              }}
               aria-label="Saturation"
             />
             <em>{Math.round(hsb.s * 100)}</em>
@@ -69,6 +78,7 @@ export function ColorPicker({ value, onChange, className = '' }: ColorPickerProp
               className="color-picker__hex"
               value={value}
               spellCheck={false}
+              style={{ background: valid, color: ink, caretColor: ink }}
               onChange={(e) => onChange(e.target.value)}
               onBlur={(e) => {
                 const ok = parseHex(e.target.value)

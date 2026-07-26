@@ -48,6 +48,11 @@ interface FromImageModalProps {
   seed?: FromImageSeed | null
   /** Drag-drop loaded an image but the browser hid the filesystem path. */
   onDropMissingPath?: () => void
+  /**
+   * Try importing a Paletter sheet PNG (embedded metadata).
+   * Return true if handled so From image should not seed new colors.
+   */
+  onTryImportSheet?: (file: File) => Promise<boolean>
 }
 
 interface ViewState {
@@ -88,6 +93,7 @@ export function FromImageModal({
   resume = null,
   seed = null,
   onDropMissingPath,
+  onTryImportSheet,
 }: FromImageModalProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
@@ -445,6 +451,10 @@ export function FromImageModal({
   async function ingest(file: File, label?: string, path?: string) {
     setError(null)
     try {
+      if (onTryImportSheet && (await onTryImportSheet(file))) {
+        handleClose()
+        return
+      }
       const data = await loadImageFile(file)
       const maxSide = 900
       const scale = Math.min(1, maxSide / Math.max(data.width, data.height))

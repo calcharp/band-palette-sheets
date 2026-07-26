@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { imageFilesFromDataTransfer } from '../lib/clipboardImage'
+import type { HistoryCommitOpts } from '../lib/history'
 import { sourcePathFromDrop } from '../lib/imageRef'
 import { simplifyPalette, type ClusterReduce } from '../lib/imagePalette'
-import { normalizeHex, parseHex, sortColors, type ColorSortKey } from '../lib/palette'
+import { normalizeHex, PALETTER_COLOR_MIME, parseHex, sortColors, type ColorSortKey } from '../lib/palette'
 import {
   cellAtPoint,
   computeAddPaletteSlot,
@@ -23,7 +24,10 @@ interface SheetPreviewProps {
   palettes: Palette[]
   layout: SheetLayout
   onTitleChange: (title: string) => void
-  onPalettesChange: (palettes: Palette[]) => void
+  onPalettesChange: (
+    palettes: Palette[] | ((prev: Palette[]) => Palette[]),
+    opts?: HistoryCommitOpts,
+  ) => void
   onAddPalette: () => void
   onFromImage: () => void
   onImportSheet: () => void
@@ -35,6 +39,8 @@ interface SheetPreviewProps {
   selectedId: string | null
   onSelectedIdChange: (id: string | null) => void
   editSlot: HTMLDivElement | null
+  /** Increments on undo/redo — drop ephemeral editors. */
+  historyGen?: number
   onOpenSourceImage?: (palette: Palette) => void
 }
 
@@ -72,6 +78,8 @@ type DragState = {
 }
 
 const DRAG_THRESHOLD = 6
+/** Live preview zoom vs layout coordinates (export stays 1×). */
+const PREVIEW_ZOOM = 1.25
 
 export function SheetPreview({
   title,
@@ -88,6 +96,7 @@ export function SheetPreview({
   selectedId,
   onSelectedIdChange,
   editSlot,
+  historyGen = 0,
   onOpenSourceImage,
 }: SheetPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -122,6 +131,8 @@ export function SheetPreview({
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [hoverAdd, setHoverAdd] = useState(false)
   const [hoverTitle, setHoverTitle] = useState(false)
+  /** Palette under an Edit-panel color drag. */
+  const [colorDropId, setColorDropId] = useState<string | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [sortState, setSortState] = useState<
     Record<string, { key: ColorSortKey; dir: 1 | -1 }>
@@ -158,6 +169,14 @@ export function SheetPreview({
       setSimplifyReduce('mean')
     }
   }, [selectedId, palettes])
+
+  // Undo/redo restores document state — drop local editors so they don't fight history.
+  useEffect(() => {
+    if (historyGen === 0) return
+    ignoreTextEditOutsideRef.current = false
+    setEdit(null)
+    setSimplifyLive(false)
+  }, [historyGen])
 
   useEffect(() => {
     function onPointerDown(e: PointerEvent) {
@@ -301,17 +320,20 @@ export function SheetPreview({
     const addSlot = computeAddPaletteSlot(displayPalettes, layout, title)
 
     const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1))
-    const sheet = renderSheet(displayPalettes, layout, dpr, title, { preview: true })
-    const sheetW = sheet.width / dpr
-    const sheetH = sheet.height / dpr
+    const pixelScale = dpr * PREVIEW_ZOOM
+    const sheet = renderSheet(displayPalettes, layout, pixelScale, title, { preview: true })
+    const sheetW = sheet.width / pixelScale
+    const sheetH = sheet.height / pixelScale
     const logicalW = Math.max(sheetW, addSlot.width)
     const logicalH = Math.max(sheetH, addSlot.height)
     sheetLogicalRef.current = { w: logicalW, h: logicalH }
 
-    host.width = Math.ceil(logicalW * dpr)
-    host.height = Math.ceil(logicalH * dpr)
-    host.style.width = `${logicalW}px`
-    host.style.height = `${logicalH}px`
+    host.width = Math.ceil(logicalW * pixelScale)
+    host.height = Math.ceil(logicalH * pixelScale)
+    // Only set width — height follows the canvas bitmap ratio so max-width
+    // constraints don't squash text horizontally.
+    host.style.width = `${logicalW * PREVIEW_ZOOM}px`
+    host.style.height = 'auto'
 
     const ctx = host.getContext('2d')
     if (!ctx) return
@@ -319,12 +341,12 @@ export function SheetPreview({
     ctx.clearRect(0, 0, host.width, host.height)
 
     // Overlay in layout coordinates (pre-DPR)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0)
     ctx.fillStyle = layout.background
     ctx.fillRect(0, 0, logicalW, logicalH)
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.drawImage(sheet, 0, 0)
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0)
 
     const d = dragRef.current
     const ringPad = 6
@@ -381,6 +403,10 @@ export function SheetPreview({
         const sel = info.hits.find((h) => h.paletteId === selectedId)
         if (sel) strokePaletteRing(sel.cell, 'rgba(170, 170, 170, 0.9)')
       }
+      if (colorDropId) {
+        const drop = info.hits.find((h) => h.paletteId === colorDropId)
+        if (drop) strokePaletteRing(drop.cell, 'rgba(80, 140, 220, 0.95)', 2)
+      }
       if (hoverAdd) {
         strokePaletteRing(addSlot.cell, 'rgba(170, 170, 170, 0.55)')
       }
@@ -400,6 +426,7 @@ export function SheetPreview({
     hoverId,
     hoverAdd,
     hoverTitle,
+    colorDropId,
     edit?.kind,
   ])
 
@@ -545,25 +572,56 @@ export function SheetPreview({
     const next = editRef.current
     if (!next) return
     ignoreTextEditOutsideRef.current = false
+
     if (next.kind === 'sheet-title') {
-      onTitleChange(next.value)
+      if (next.value !== title) onTitleChange(next.value)
     } else if (next.kind === 'name') {
-      onPalettesChange(
-        palettes.map((p) => (p.id === next.paletteId ? { ...p, name: next.value } : p)),
-      )
+      const pal = palettes.find((p) => p.id === next.paletteId)
+      if (pal && pal.name !== next.value) {
+        onPalettesChange(
+          palettes.map((p) => (p.id === next.paletteId ? { ...p, name: next.value } : p)),
+        )
+      }
     } else {
+      // Colors are live-committed while editing; only flush a final parse if needed.
       const hex = parseHex(next.value) ?? normalizeHex(next.value)
-      onPalettesChange(
-        palettes.map((p) => {
-          if (p.id !== next.paletteId) return p
-          const colors = [...p.colors]
-          if (next.colorIndex >= colors.length) return p
-          colors[next.colorIndex] = hex
-          return { ...p, colors }
-        }),
-      )
+      const pal = palettes.find((p) => p.id === next.paletteId)
+      const current = pal?.colors[next.colorIndex]
+      if (pal && current !== hex) {
+        onPalettesChange(
+          palettes.map((p) => {
+            if (p.id !== next.paletteId) return p
+            const colors = [...p.colors]
+            if (next.colorIndex >= colors.length) return p
+            colors[next.colorIndex] = hex
+            return { ...p, colors }
+          }),
+          { coalesce: `color:${next.paletteId}:${next.colorIndex}` },
+        )
+      }
     }
     setEdit(null)
+  }
+
+  function applyColorEdit(paletteId: string, colorIndex: number, raw: string) {
+    setEdit((prev) =>
+      prev?.kind === 'color' && prev.paletteId === paletteId && prev.colorIndex === colorIndex
+        ? { ...prev, value: raw }
+        : prev,
+    )
+    const hex = parseHex(raw)
+    if (!hex) return
+    onPalettesChange((prev) => {
+      const pal = prev.find((p) => p.id === paletteId)
+      if (!pal || pal.colors[colorIndex] === hex) return prev
+      return prev.map((p) => {
+        if (p.id !== paletteId) return p
+        const colors = [...p.colors]
+        if (colorIndex >= colors.length) return p
+        colors[colorIndex] = hex
+        return { ...p, colors }
+      })
+    }, { coalesce: `color:${paletteId}:${colorIndex}` })
   }
 
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -694,7 +752,12 @@ export function SheetPreview({
     const nextPalettes = displayPalettes.map((p) => {
       if (p.id !== hit.paletteId) return p
       newIndex = p.colors.length
-      return { ...p, colors: [...p.colors, '#000000'] }
+      const colors = [...p.colors, '#000000']
+      const sourcePicks =
+        p.sourcePicks !== undefined
+          ? [...p.sourcePicks, { hex: '#000000', x: 0, y: 0 }]
+          : p.sourcePicks
+      return { ...p, colors, sourcePicks }
     })
     onPalettesChange(nextPalettes)
     setEdit({
@@ -846,7 +909,38 @@ export function SheetPreview({
         }
       : undefined
 
+  function appendColorToPalette(paletteId: string, raw: string) {
+    const normalized = parseHex(raw) ?? normalizeHex(raw)
+    setSimplifyLive(false)
+    onPalettesChange((prev) =>
+      prev.map((p) => {
+        if (p.id !== paletteId) return p
+        const colors = [...p.colors, normalized]
+        const sourcePicks =
+          p.sourcePicks !== undefined
+            ? [...p.sourcePicks, { hex: normalized, x: 0, y: 0 }]
+            : p.sourcePicks
+        return { ...p, colors, sourcePicks }
+      }),
+    )
+  }
+
+  function hasPaletterColorDrag(dt: DataTransfer): boolean {
+    return [...dt.types].includes(PALETTER_COLOR_MIME)
+  }
+
   function onFrameDragOver(e: React.DragEvent) {
+    if (hasPaletterColorDrag(e.dataTransfer)) {
+      e.preventDefault()
+      e.stopPropagation()
+      e.dataTransfer.dropEffect = 'copy'
+      const pt = clientToSheet(e.clientX, e.clientY)
+      const cell = pt ? cellAtPoint(pt.x, pt.y, displayPalettes, layout, title) : null
+      const nextId = cell?.paletteId ?? null
+      if (nextId !== colorDropId) setColorDropId(nextId)
+      if (hoverAdd) setHoverAdd(false)
+      return
+    }
     if (![...e.dataTransfer.types].includes('Files')) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -856,12 +950,28 @@ export function SheetPreview({
   function onFrameDragLeave(e: React.DragEvent) {
     if (frameRef.current?.contains(e.relatedTarget as Node)) return
     setHoverAdd(false)
+    setColorDropId(null)
   }
 
   function onFrameDrop(e: React.DragEvent) {
+    if (hasPaletterColorDrag(e.dataTransfer)) {
+      e.preventDefault()
+      e.stopPropagation()
+      const raw =
+        e.dataTransfer.getData(PALETTER_COLOR_MIME) || e.dataTransfer.getData('text/plain')
+      const pt = clientToSheet(e.clientX, e.clientY)
+      const cell = pt ? cellAtPoint(pt.x, pt.y, displayPalettes, layout, title) : null
+      setColorDropId(null)
+      setHoverAdd(false)
+      onSheetActiveChangeRef.current?.(true)
+      if (!raw || !cell) return
+      appendColorToPalette(cell.paletteId, raw)
+      return
+    }
     if (![...e.dataTransfer.types].includes('Files')) return
     e.preventDefault()
     setHoverAdd(false)
+    setColorDropId(null)
     onSheetActiveChangeRef.current?.(true)
     const image = imageFilesFromDataTransfer(e.dataTransfer)[0]
     if (!image) return
@@ -876,7 +986,9 @@ export function SheetPreview({
         embedded={colorEditInSlot}
         hex={colorEdit.value}
         paletteName={colorPal.name}
-        onChange={(hex) => setEdit({ ...colorEdit, value: hex })}
+        onChange={(hex) =>
+          applyColorEdit(colorEdit.paletteId, colorEdit.colorIndex, hex)
+        }
         onClose={() => commitEdit()}
       />
     ) : null
@@ -916,10 +1028,18 @@ export function SheetPreview({
             onResetSimplify={resetSimplify}
             onAddMixedColor={(hex) => {
               setSimplifyLive(false)
+              const normalized = parseHex(hex) ?? normalizeHex(hex)
               onPalettesChange(
-                palettes.map((p) =>
-                  p.id === selectedSource.id ? { ...p, colors: [...p.colors, hex] } : p,
-                ),
+                palettes.map((p) => {
+                  if (p.id !== selectedSource.id) return p
+                  const colors = [...p.colors, normalized]
+                  // Keep image pick metadata aligned when present (manual adds get a stub pick).
+                  const sourcePicks =
+                    p.sourcePicks !== undefined
+                      ? [...p.sourcePicks, { hex: normalized, x: 0, y: 0 }]
+                      : p.sourcePicks
+                  return { ...p, colors, sourcePicks }
+                }),
               )
             }}
             onRemoveColor={(index) => {
@@ -1164,13 +1284,13 @@ function DragGhostCanvas({ palette, layout }: { palette: Palette; layout: SheetL
     const host = ref.current
     if (!host) return
     const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1))
-    const sheet = renderSheet([palette], { ...layout, columns: 1, padding: 8 }, dpr)
-    const logicalW = sheet.width / dpr
-    const logicalH = sheet.height / dpr
+    const pixelScale = dpr * PREVIEW_ZOOM
+    const sheet = renderSheet([palette], { ...layout, columns: 1, padding: 8 }, pixelScale)
+    const logicalW = sheet.width / pixelScale
     host.width = sheet.width
     host.height = sheet.height
-    host.style.width = `${logicalW}px`
-    host.style.height = `${logicalH}px`
+    host.style.width = `${logicalW * PREVIEW_ZOOM}px`
+    host.style.height = 'auto'
     const ctx = host.getContext('2d')
     if (!ctx) return
     ctx.clearRect(0, 0, host.width, host.height)
