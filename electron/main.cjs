@@ -24,11 +24,14 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      spellcheck: false,
     },
   })
 
+  // Local fonts + tiny asar → first paint is fast; show as soon as it's ready.
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+    mainWindow?.focus()
   })
 
   // Closing the window must end the whole app (no tray / background linger).
