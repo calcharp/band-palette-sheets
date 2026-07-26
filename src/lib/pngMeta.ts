@@ -266,7 +266,7 @@ export async function deserializeSheetDocument(doc: SheetDocument): Promise<{
         // Ignore corrupt source images.
       }
     }
-    if (palette.colors.length) palettes.push(palette)
+    palettes.push(palette)
   }
   return { palettes, layout, title: typeof doc.title === 'string' ? doc.title : '' }
 }
@@ -295,7 +295,10 @@ export async function pngBlobWithSheetMeta(
   // iTXt carries UTF-8 JSON (names, hex, optional base64 source PNGs).
   const json = JSON.stringify(doc)
   const next = embedPngText(bytes, SHEET_META_KEYWORD, json)
-  return new Blob([next], { type: 'image/png' })
+  // Copy into a fresh ArrayBuffer so Blob doesn't share a larger underlying buffer.
+  const copy = new Uint8Array(next.byteLength)
+  copy.set(next)
+  return new Blob([copy], { type: 'image/png' })
 }
 
 /** Try to read an embedded Paletter document from a PNG file/blob. */

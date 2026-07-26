@@ -1,52 +1,121 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const MAX_HISTORY = 60
 
+export interface HistoryStack<T> {
+  present: T
+  past: T[]
+  future: T[]
+}
+
+export function createHistoryStack<T>(initial: T): HistoryStack<T> {
+  return { present: initial, past: [], future: [] }
+}
+
+export function historyCommit<T>(
+  stack: HistoryStack<T>,
+  next: T | ((prev: T) => T),
+): HistoryStack<T> {
+  const value =
+    typeof next === 'function' ? (next as (p: T) => T)(stack.present) : next
+  const past = [...stack.past, structuredClone(stack.present) as T]
+  if (past.length > MAX_HISTORY) past.shift()
+  return {
+    present: value,
+    past,
+    future: [],
+  }
+}
+
+export function historyUndo<T>(stack: HistoryStack<T>): HistoryStack<T> | null {
+  if (stack.past.length === 0) return null
+  const past = [...stack.past]
+  const last = past.pop()!
+  return {
+    present: last,
+    past,
+    future: [...stack.future, structuredClone(stack.present) as T],
+  }
+}
+
+export function historyRedo<T>(stack: HistoryStack<T>): HistoryStack<T> | null {
+  if (stack.future.length === 0) return null
+  const future = [...stack.future]
+  const next = future.pop()!
+  return {
+    present: next,
+    past: [...stack.past, structuredClone(stack.present) as T],
+    future,
+  }
+}
+
+export function historyCanUndo<T>(stack: HistoryStack<T>): boolean {
+  return stack.past.length > 0
+}
+
+export function historyCanRedo<T>(stack: HistoryStack<T>): boolean {
+  return stack.future.length > 0
+}
+
 /**
- * Present-state + undo/redo stacks. `set` commits a new snapshot (pushing the
- * previous present onto the undo stack). Undo does not re-commit.
+ * Present-state + undo/redo for a single document. Prefer `createHistoryStack`
+ * when managing multiple documents.
  */
 export function useHistory<T>(initial: T) {
-  const [present, setPresent] = useState(initial)
-  const pastRef = useRef<T[]>([])
-  const futureRef = useRef<T[]>([])
-  const presentRef = useRef(present)
-  presentRef.current = present
+  const [stack, setStack] = useState(() => createHistoryStack(initial))
 
-  const set = useCallback((next: T | ((prev: T) => T)) => {
-    setPresent((prev) => {
-      const value = typeof next === 'function' ? (next as (p: T) => T)(prev) : next
-      pastRef.current.push(structuredClone(prev) as T)
-      if (pastRef.current.length > MAX_HISTORY) pastRef.current.shift()
-      futureRef.current = []
-      return value
-    })
-  }, [])
+  useHistoryKeyboard({
+    enabled: true,
+    canUndo: () => historyCanUndo(stack),
+    canRedo: () => historyCanRedo(stack),
+    undo: () => {
+      setStack((s) => historyUndo(s) ?? s)
+    },
+    redo: () => {
+      setStack((s) => historyRedo(s) ?? s)
+    },
+  })
 
-  const undo = useCallback(() => {
-    if (pastRef.current.length === 0) return false
-    setPresent((prev) => {
-      const last = pastRef.current.pop()!
-      futureRef.current.push(structuredClone(prev) as T)
-      return last
-    })
-    return true
-  }, [])
+  return {
+    present: stack.present,
+    set: (next: T | ((prev: T) => T)) => {
+      setStack((s) => historyCommit(s, next))
+    },
+    undo: () => {
+      let ok = false
+      setStack((s) => {
+        const next = historyUndo(s)
+        ok = next != null
+        return next ?? s
+      })
+      return ok
+    },
+    redo: () => {
+      let ok = false
+      setStack((s) => {
+        const next = historyRedo(s)
+        ok = next != null
+        return next ?? s
+      })
+      return ok
+    },
+    canUndo: () => historyCanUndo(stack),
+    canRedo: () => historyCanRedo(stack),
+  }
+}
 
-  const redo = useCallback(() => {
-    if (futureRef.current.length === 0) return false
-    setPresent((prev) => {
-      const next = futureRef.current.pop()!
-      pastRef.current.push(structuredClone(prev) as T)
-      return next
-    })
-    return true
-  }, [])
-
-  const canUndo = () => pastRef.current.length > 0
-  const canRedo = () => futureRef.current.length > 0
-
+export function useHistoryKeyboard(opts: {
+  enabled: boolean
+  canUndo: () => boolean
+  canRedo: () => boolean
+  undo: () => void
+  redo: () => void
+  /** Use capture phase (e.g. to beat other handlers). */
+  capture?: boolean
+}) {
+  const { enabled, canUndo, canRedo, undo, redo, capture = false } = opts
   useEffect(() => {
+    if (!enabled) return
     function onKey(e: KeyboardEvent) {
       const mod = e.ctrlKey || e.metaKey
       if (!mod) return
@@ -56,18 +125,18 @@ export function useHistory<T>(initial: T) {
 
       const key = e.key.toLowerCase()
       if (key === 'z' && !e.shiftKey) {
-        if (pastRef.current.length === 0) return
+        if (!canUndo()) return
         e.preventDefault()
+        if (capture) e.stopImmediatePropagation()
         undo()
       } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
-        if (futureRef.current.length === 0) return
+        if (!canRedo()) return
         e.preventDefault()
+        if (capture) e.stopImmediatePropagation()
         redo()
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [undo, redo])
-
-  return { present, set, undo, redo, canUndo, canRedo, presentRef }
+    window.addEventListener('keydown', onKey, capture)
+    return () => window.removeEventListener('keydown', onKey, capture)
+  }, [enabled, canUndo, canRedo, undo, redo, capture])
 }

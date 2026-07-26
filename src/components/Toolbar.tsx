@@ -14,9 +14,6 @@ interface ToolbarProps {
   onTitleChange: (title: string) => void
   onLayoutChange: (layout: SheetLayout) => void
   onPalettesChange: (palettes: Palette[]) => void
-  onAddPalette: () => void
-  onFromImage: () => void
-  onImportSheet: () => void
   onSave: () => void
   saveBusy?: boolean
   onEditSlot: (el: HTMLDivElement | null) => void
@@ -28,10 +25,23 @@ interface ToolbarProps {
     fileName: string
     handle: FileSystemFileHandle | null
   } | null>
+  onAddPngToLibrary: (folderId: string | null) => Promise<{
+    name: string
+    fileName: string
+    handle: FileSystemFileHandle | null
+  } | null>
   onOpenLibraryEntry: (entry: LibraryEntry) => void
+  onOpenLibraryFolder: (folderId: string | null) => void
+  onLinkedLibraryEntry?: (entryId: string) => void
+  onLibraryTabActiveChange?: (active: boolean) => void
+  openSheets: { id: string; label: string }[]
+  activeSheetId: string
+  onSelectSheet: (id: string) => void
+  onCloseSheet: (id: string) => void
+  onNewSheet: () => void
 }
 
-type SideTab = 'add' | 'edit' | 'layout' | 'json' | 'library'
+type SideTab = 'library' | 'edit' | 'layout' | 'json'
 
 function FloppyIcon() {
   return (
@@ -59,20 +69,30 @@ export function Toolbar({
   onTitleChange,
   onLayoutChange,
   onPalettesChange,
-  onAddPalette,
-  onFromImage,
-  onImportSheet,
   onSave,
   saveBusy = false,
   onEditSlot,
   layoutFocus = null,
   onLayoutFocusHandled,
   onAddToLibrary,
+  onAddPngToLibrary,
   onOpenLibraryEntry,
+  onOpenLibraryFolder,
+  onLinkedLibraryEntry,
+  onLibraryTabActiveChange,
+  openSheets,
+  activeSheetId,
+  onSelectSheet,
+  onCloseSheet,
+  onNewSheet,
 }: ToolbarProps) {
-  const [tab, setTab] = useState<SideTab>('add')
+  const [tab, setTab] = useState<SideTab>('library')
   const [sheetTitleOpen, setSheetTitleOpen] = useState(true)
+  const [sheetMenuOpen, setSheetMenuOpen] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
+  const sheetPickerRef = useRef<HTMLDivElement>(null)
+
+  const activeSheet = openSheets.find((s) => s.id === activeSheetId) ?? openSheets[0]
 
   useEffect(() => {
     if (selectedId) setTab('edit')
@@ -81,6 +101,22 @@ export function Toolbar({
   useEffect(() => {
     if (tab !== 'edit' || !selectedId) onEditSlot(null)
   }, [tab, selectedId, onEditSlot])
+
+  useEffect(() => {
+    onLibraryTabActiveChange?.(tab === 'library')
+  }, [tab, onLibraryTabActiveChange])
+
+  useEffect(() => {
+    if (!sheetMenuOpen) return
+    function onDoc(e: MouseEvent) {
+      const t = e.target as Node | null
+      if (sheetPickerRef.current && t && !sheetPickerRef.current.contains(t)) {
+        setSheetMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [sheetMenuOpen])
 
   useEffect(() => {
     if (layoutFocus !== 'sheet-title') return
@@ -104,6 +140,66 @@ export function Toolbar({
         <div className="toolbar__brand">
           <p className="toolbar__mark">Paletter</p>
         </div>
+        <div className="toolbar__sheet-picker" ref={sheetPickerRef}>
+          <button
+            type="button"
+            className={`toolbar__sheet-select ${sheetMenuOpen ? 'toolbar__sheet-select--open' : ''}`}
+            aria-label="Open sheets"
+            aria-haspopup="listbox"
+            aria-expanded={sheetMenuOpen}
+            title={activeSheet?.label}
+            onClick={() => setSheetMenuOpen((v) => !v)}
+          >
+            <span className="toolbar__sheet-select-label">{activeSheet?.label ?? 'Untitled'}</span>
+            <span className="toolbar__sheet-select-caret" aria-hidden>
+              ▾
+            </span>
+          </button>
+          {sheetMenuOpen ? (
+            <div className="toolbar__sheet-menu" role="listbox" aria-label="Open sheets">
+              {openSheets.map((sheet) => (
+                <div key={sheet.id} className="toolbar__sheet-menu-row">
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={sheet.id === activeSheetId}
+                    className={`toolbar__sheet-menu-item ${
+                      sheet.id === activeSheetId ? 'toolbar__sheet-menu-item--on' : ''
+                    }`}
+                    onClick={() => {
+                      onSelectSheet(sheet.id)
+                      setSheetMenuOpen(false)
+                    }}
+                  >
+                    {sheet.label}
+                  </button>
+                  <button
+                    type="button"
+                    className="toolbar__sheet-menu-close"
+                    aria-label={`Close ${sheet.label}`}
+                    title="Close"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onCloseSheet(sheet.id)
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="toolbar__sheet-menu-new"
+                onClick={() => {
+                  onNewSheet()
+                  setSheetMenuOpen(false)
+                }}
+              >
+                + New sheet
+              </button>
+            </div>
+          ) : null}
+        </div>
       </header>
 
       <aside className="side-panel" aria-label="Tools">
@@ -111,11 +207,10 @@ export function Toolbar({
           <div className="side-panel__tabs" role="tablist">
             {(
               [
-                ['add', 'Add'],
+                ['library', 'Library'],
                 ['edit', 'Edit'],
                 ['layout', 'Layout'],
                 ['json', 'JSON'],
-                ['library', 'Library'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -148,18 +243,16 @@ export function Toolbar({
           } ${tab === 'library' ? 'side-panel__body--library' : ''}`}
           role="tabpanel"
         >
-          {tab === 'add' && (
-            <div className="side-panel__actions">
-              <button type="button" className="side-panel__action" onClick={onAddPalette}>
-                + Palette
-              </button>
-              <button type="button" className="side-panel__action" onClick={onFromImage}>
-                From image
-              </button>
-              <button type="button" className="side-panel__action" onClick={onImportSheet}>
-                Import sheet
-              </button>
-            </div>
+          {tab === 'library' && (
+            <LibraryPanel
+              active={tab === 'library'}
+              onAddCurrentSheet={onAddToLibrary}
+              onAddPngFile={onAddPngToLibrary}
+              onOpenEntry={onOpenLibraryEntry}
+              onOpenFolder={onOpenLibraryFolder}
+              onLinkedEntry={onLinkedLibraryEntry}
+              addBusy={saveBusy}
+            />
           )}
 
           {tab === 'edit' && !selectedId && (
@@ -218,15 +311,6 @@ export function Toolbar({
               onTitleChange={onTitleChange}
               onLayoutChange={onLayoutChange}
               onPalettesChange={onPalettesChange}
-            />
-          )}
-
-          {tab === 'library' && (
-            <LibraryPanel
-              active={tab === 'library'}
-              onAddCurrent={onAddToLibrary}
-              onOpenEntry={onOpenLibraryEntry}
-              addBusy={saveBusy}
             />
           )}
 

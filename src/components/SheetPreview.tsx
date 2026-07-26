@@ -32,7 +32,6 @@ interface SheetPreviewProps {
   onDropMissingPath?: () => void
   /** Fired when the sheet gains/loses “last clicked” status for paste. */
   onSheetActiveChange?: (active: boolean) => void
-  onRequestSheetTitleEdit: () => void
   selectedId: string | null
   onSelectedIdChange: (id: string | null) => void
   editSlot: HTMLDivElement | null
@@ -86,7 +85,6 @@ export function SheetPreview({
   onImportPng,
   onDropMissingPath,
   onSheetActiveChange,
-  onRequestSheetTitleEdit,
   selectedId,
   onSelectedIdChange,
   editSlot,
@@ -235,6 +233,21 @@ export function SheetPreview({
           )
           // Click on any palette cell: keep current selection until click/drag resolves.
           if (cell) return
+          // Sheet title hit — don't clear an in-progress title edit.
+          const titleBox = computeSheetHits(
+            displayPalettesRef.current,
+            layoutRef.current,
+            titleRef.current,
+          ).title
+          const pad = 6
+          if (
+            pt.x >= titleBox.x - pad &&
+            pt.x <= titleBox.x + titleBox.w + pad &&
+            pt.y >= titleBox.y - pad &&
+            pt.y <= titleBox.y + titleBox.h + pad
+          ) {
+            return
+          }
         }
         pendingDeselect.current = false
         deselectPaletteRef.current()
@@ -397,7 +410,9 @@ export function SheetPreview({
       document.removeEventListener('pointerdown', onPointerDown)
       document.removeEventListener('keydown', onKey)
     }
-  }, [edit, palettes, title])
+    // Intentionally not depending on `edit` value — rebinding every keystroke breaks typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edit?.kind, edit && edit.kind === 'name' ? edit.paletteId : null])
 
   useEffect(() => {
     function onMove(e: PointerEvent) {
@@ -531,7 +546,12 @@ export function SheetPreview({
     ) {
       pendingDrag.current = null
       pendingDeselect.current = false
-      onRequestSheetTitleEdit()
+      if (editRef.current?.kind === 'color') commitEdit()
+      setEdit({
+        kind: 'sheet-title',
+        value: title,
+        box: titleBox,
+      })
       return
     }
 
@@ -661,8 +681,16 @@ export function SheetPreview({
   }
 
   function deselectPalette() {
-    if (editRef.current?.kind === 'color') commitEdit()
-    else setEdit(null)
+    const current = editRef.current
+    if (
+      current?.kind === 'color' ||
+      current?.kind === 'sheet-title' ||
+      current?.kind === 'name'
+    ) {
+      commitEdit()
+    } else {
+      setEdit(null)
+    }
     onSelectedIdChange(null)
     setSimplifyLive(false)
     setHoverId(null)

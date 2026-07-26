@@ -7,11 +7,26 @@ import {
 import { SheetPreview } from './components/SheetPreview'
 import { Toolbar } from './components/Toolbar'
 import { clipboardImageLabel } from './lib/clipboardImage'
-import { useHistory } from './lib/history'
-import { tryImportPaletteSheetPng } from './lib/importSheet'
+import {
+  createHistoryStack,
+  historyCanRedo,
+  historyCanUndo,
+  historyCommit,
+  historyRedo,
+  historyUndo,
+  useHistoryKeyboard,
+  type HistoryStack,
+} from './lib/history'
+import { tryImportPaletteSheetPng, diagnosePaletteSheetPng } from './lib/importSheet'
 import { loadImageFile } from './lib/imagePalette'
 import type { LibraryEntry } from './lib/library'
-import { loadFileHandle } from './lib/library'
+import {
+  entriesInFolder,
+  loadFileHandle,
+  loadLibraryMeta,
+  makeLibraryPreview,
+  storeEntryThumb,
+} from './lib/library'
 import { createPalette, uid } from './lib/palette'
 import { attachImagePasteListeners } from './lib/pasteImage'
 import { pngBlobWithSheetMeta } from './lib/pngMeta'
@@ -26,6 +41,50 @@ interface DocState {
   title: string
   palettes: Palette[]
   layout: SheetLayout
+}
+
+interface OpenSheet {
+  id: string
+  libraryEntryId: string | null
+  handle: FileSystemFileHandle | null
+  history: HistoryStack<DocState>
+}
+
+function emptyDoc(): DocState {
+  return { title: '', palettes: [], layout: DEFAULT_LAYOUT }
+}
+
+function createOpenSheet(
+  doc: DocState = emptyDoc(),
+  opts?: {
+    libraryEntryId?: string | null
+    handle?: FileSystemFileHandle | null
+  },
+): OpenSheet {
+  return {
+    id: uid('sheet'),
+    libraryEntryId: opts?.libraryEntryId ?? null,
+    handle: opts?.handle ?? null,
+    history: createHistoryStack(doc),
+  }
+}
+
+function isBlankSheet(sheet: OpenSheet): boolean {
+  const { present, past } = sheet.history
+  return (
+    !present.title.trim() &&
+    present.palettes.length === 0 &&
+    !sheet.handle &&
+    !sheet.libraryEntryId &&
+    past.length === 0
+  )
+}
+
+function sheetTabLabel(sheet: OpenSheet): string {
+  const title = sheet.history.present.title.trim()
+  if (title) return title
+  if (sheet.handle?.name) return sheet.handle.name.replace(/\.png$/i, '')
+  return 'Untitled'
 }
 
 async function imageDataForFromImage(
@@ -54,22 +113,22 @@ async function imageDataForFromImage(
 }
 
 export default function App() {
-  const { present, set } = useHistory<DocState>({
-    title: '',
-    palettes: [],
-    layout: DEFAULT_LAYOUT,
-  })
-  const { title, palettes, layout } = present
+  const initialSheetRef = useRef<OpenSheet | null>(null)
+  if (!initialSheetRef.current) initialSheetRef.current = createOpenSheet()
+  const [sheets, setSheets] = useState<OpenSheet[]>([initialSheetRef.current])
+  const [activeSheetId, setActiveSheetId] = useState(initialSheetRef.current.id)
+  const activeSheet = sheets.find((s) => s.id === activeSheetId) ?? sheets[0]!
+  const { title, palettes, layout } = activeSheet.history.present
+
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editSlot, setEditSlot] = useState<HTMLDivElement | null>(null)
   const [fromImageOpen, setFromImageOpen] = useState(false)
   const [fromImageResume, setFromImageResume] = useState<FromImageResume | null>(null)
   const [fromImageSeed, setFromImageSeed] = useState<FromImageSeed | null>(null)
   const [saveBusy, setSaveBusy] = useState(false)
-  const [layoutFocus, setLayoutFocus] = useState<'sheet-title' | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
   const [toastTone, setToastTone] = useState<'warn' | 'error'>('error')
-  const fileHandleRef = useRef<FileSystemFileHandle | null>(null)
+  const [libraryTabActive, setLibraryTabActive] = useState(false)
   const importInputRef = useRef<HTMLInputElement>(null)
   const fromImageOpenRef = useRef(false)
   const sheetActiveRef = useRef(false)
@@ -79,11 +138,48 @@ export default function App() {
   const openPastedInFromImageRef = useRef<
     (file: File, sourcePath: string) => Promise<void>
   >(async () => {})
+  const sheetsRef = useRef(sheets)
+  const activeSheetIdRef = useRef(activeSheetId)
+  sheetsRef.current = sheets
+  activeSheetIdRef.current = activeSheetId
   fromImageOpenRef.current = fromImageOpen
 
   const onEditSlot = useCallback((el: HTMLDivElement | null) => {
     setEditSlot(el)
   }, [])
+
+  const patchActiveHistory = useCallback(
+    (updater: (history: HistoryStack<DocState>) => HistoryStack<DocState>) => {
+      setSheets((prev) =>
+        prev.map((s) =>
+          s.id === activeSheetIdRef.current ? { ...s, history: updater(s.history) } : s,
+        ),
+      )
+    },
+    [],
+  )
+
+  const set = useCallback((next: DocState | ((prev: DocState) => DocState)) => {
+    patchActiveHistory((history) => historyCommit(history, next))
+  }, [patchActiveHistory])
+
+  useHistoryKeyboard({
+    enabled: !libraryTabActive,
+    canUndo: () => {
+      const sheet = sheetsRef.current.find((s) => s.id === activeSheetIdRef.current)
+      return sheet ? historyCanUndo(sheet.history) : false
+    },
+    canRedo: () => {
+      const sheet = sheetsRef.current.find((s) => s.id === activeSheetIdRef.current)
+      return sheet ? historyCanRedo(sheet.history) : false
+    },
+    undo: () => {
+      patchActiveHistory((history) => historyUndo(history) ?? history)
+    },
+    redo: () => {
+      patchActiveHistory((history) => historyRedo(history) ?? history)
+    },
+  })
 
   useEffect(() => {
     const bg = layout.background.trim().toLowerCase()
@@ -91,26 +187,39 @@ export default function App() {
     set((d) => ({ ...d, layout: { ...d.layout, background: '#ffffff' } }))
   }, [layout.background, set])
 
+  useEffect(() => {
+    setSelectedId(null)
+  }, [activeSheetId])
+
   async function handleSave(): Promise<SavePngResult> {
+    const sheet = sheetsRef.current.find((s) => s.id === activeSheetIdRef.current)
+    if (!sheet) return { status: 'cancelled' }
     if (saveBusy) {
-      return fileHandleRef.current
-        ? { status: 'saved', handle: fileHandleRef.current }
+      return sheet.handle
+        ? { status: 'saved', handle: sheet.handle }
         : { status: 'cancelled' }
     }
     setSaveBusy(true)
     try {
-      const canvas = renderSheet(palettes, layout, 2, title)
+      const { title: t, palettes: pals, layout: lay } = sheet.history.present
+      const canvas = renderSheet(pals, lay, 2, t)
       const raw = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), 'image/png'),
       )
       if (!raw) return { status: 'failed', message: 'Could not render sheet.' }
-      const blob = await pngBlobWithSheetMeta(raw, palettes, layout, title)
+      const blob = await pngBlobWithSheetMeta(raw, pals, lay, t)
       const result = await savePngBlob(
         blob,
-        suggestedPngFileName(title),
-        fileHandleRef.current,
+        suggestedPngFileName(t),
+        sheet.handle,
       )
-      if (result.status === 'saved') fileHandleRef.current = result.handle
+      if (result.status === 'saved') {
+        setSheets((prev) =>
+          prev.map((s) =>
+            s.id === sheet.id ? { ...s, handle: result.handle } : s,
+          ),
+        )
+      }
       if (result.status === 'failed') {
         showToast(result.message, 'error')
       }
@@ -275,6 +384,29 @@ export default function App() {
     importInputRef.current?.click()
   }
 
+  function addNewSheet() {
+    const sheet = createOpenSheet()
+    setSheets((prev) => [...prev, sheet])
+    setActiveSheetId(sheet.id)
+  }
+
+  function closeSheet(id: string) {
+    setSheets((prev) => {
+      if (prev.length === 1) {
+        const blank = createOpenSheet()
+        setActiveSheetId(blank.id)
+        return [blank]
+      }
+      const idx = prev.findIndex((s) => s.id === id)
+      const next = prev.filter((s) => s.id !== id)
+      if (activeSheetIdRef.current === id) {
+        const fallback = next[Math.max(0, idx - 1)] ?? next[0]!
+        setActiveSheetId(fallback.id)
+      }
+      return next
+    })
+  }
+
   async function addCurrentToLibrary(_folderId: string | null) {
     const result = await handleSave()
     if (result.status === 'cancelled') {
@@ -283,47 +415,237 @@ export default function App() {
     }
     if (result.status === 'failed') return null
 
-    const handle = result.status === 'saved' ? result.handle : fileHandleRef.current
-    const fileName = handle?.name || suggestedPngFileName(title)
-    const name = title.trim() || fileName.replace(/\.png$/i, '') || 'Untitled'
-    return { name, fileName, handle }
-  }
-
-  async function openLibraryEntry(entry: LibraryEntry) {
-    const handle = await loadFileHandle(entry.id)
+    const sheet = sheetsRef.current.find((s) => s.id === activeSheetIdRef.current)
+    const handle =
+      result.status === 'saved' ? result.handle : sheet?.handle ?? null
     if (!handle) {
       showToast(
-        'No file link for this reference. Open the PNG manually, or remove and re-add it after saving.',
+        'No file link after save. Use Save (file picker), then Add open sheet again.',
         'warn',
         6000,
       )
-      return
+      return null
     }
+
+    let preview: Blob | null = null
     try {
-      const query = await handle.queryPermission({ mode: 'read' })
-      if (
-        query !== 'granted' &&
-        (await handle.requestPermission({ mode: 'read' })) !== 'granted'
-      ) {
-        showToast('Could not access that file.', 'error')
-        return
-      }
       const file = await handle.getFile()
+      const check = await diagnosePaletteSheetPng(file)
+      if (check !== 'ok') {
+        showToast(
+          'Save finished but the PNG is missing Paletter data. Try Save again, then Add open sheet.',
+          'error',
+          7000,
+        )
+        return null
+      }
+      preview = file
+    } catch {
+      showToast('Could not verify the saved file.', 'error')
+      return null
+    }
+
+    const t = sheet?.history.present.title ?? ''
+    const fileName = handle.name || suggestedPngFileName(t)
+    const name = t.trim() || fileName.replace(/\.png$/i, '') || 'Untitled'
+    return { name, fileName, handle, preview }
+  }
+
+  async function addPngFileToLibrary(_folderId: string | null) {
+    type OpenPicker = (options?: {
+      multiple?: boolean
+      types?: { description: string; accept: Record<string, string[]> }[]
+    }) => Promise<FileSystemFileHandle[]>
+
+    const openPicker =
+      typeof window !== 'undefined' && 'showOpenFilePicker' in window
+        ? (window.showOpenFilePicker as OpenPicker).bind(window)
+        : null
+
+    let handle: FileSystemFileHandle | null = null
+    let file: File | null = null
+
+    if (openPicker) {
+      try {
+        const handles = await openPicker({
+          multiple: false,
+          types: [
+            {
+              description: 'PNG image',
+              accept: { 'image/png': ['.png'] },
+            },
+          ],
+        })
+        handle = handles[0] ?? null
+        if (!handle) return null
+        file = await handle.getFile()
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') return null
+        showToast('Could not open that file.', 'error')
+        return null
+      }
+    } else {
+      file = await new Promise<File | null>((resolve) => {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.accept = 'image/png,.png'
+        input.onchange = () => resolve(input.files?.[0] ?? null)
+        input.oncancel = () => resolve(null)
+        input.click()
+      })
+      if (!file) return null
+    }
+
+    try {
       const sheet = await tryImportPaletteSheetPng(file)
       if (!sheet) {
         showToast('That file is not a Paletter sheet PNG.', 'error')
-        return
+        return null
       }
-      fileHandleRef.current = handle
-      setSelectedId(null)
-      set({
-        title: sheet.title ?? '',
+      const fileName = handle?.name || file.name
+      const name =
+        sheet.title?.trim() || fileName.replace(/\.png$/i, '') || 'Untitled'
+      return { name, fileName, handle, preview: file }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not read that PNG.', 'error')
+      return null
+    }
+  }
+
+  async function loadEntryAsDoc(entry: LibraryEntry): Promise<{
+    doc: DocState
+    handle: FileSystemFileHandle
+  } | null> {
+    const handle = await loadFileHandle(entry.id)
+    if (!handle) {
+      showToast(
+        `No file link for “${entry.name}”. Re-add it after saving.`,
+        'warn',
+        6000,
+      )
+      return null
+    }
+    const query = await handle.queryPermission({ mode: 'read' })
+    if (
+      query !== 'granted' &&
+      (await handle.requestPermission({ mode: 'read' })) !== 'granted'
+    ) {
+      showToast(`Could not access “${entry.name}”.`, 'error')
+      return null
+    }
+    const file = await handle.getFile()
+    const sheet = await tryImportPaletteSheetPng(file)
+    if (!sheet) {
+      const why = await diagnosePaletteSheetPng(file)
+      if (why === 'no-meta' || why === 'bad-meta') {
+        showToast(
+          `“${entry.name}” has no Paletter sheet data. Open it only works for PNGs saved from this app — re-save the sheet, then Add open sheet again.`,
+          'error',
+          8000,
+        )
+      } else {
+        showToast(`“${entry.name}” is not a readable PNG.`, 'error')
+      }
+      return null
+    }
+    void makeLibraryPreview(file)
+      .then((thumb) => storeEntryThumb(entry.id, thumb))
+      .catch(() => {})
+    return {
+      handle,
+      doc: {
+        title: sheet.title ?? entry.name,
         layout: sheet.layout ?? DEFAULT_LAYOUT,
         palettes: sheet.palettes,
+      },
+    }
+  }
+
+  async function openLibraryEntry(entry: LibraryEntry) {
+    try {
+      const loaded = await loadEntryAsDoc(entry)
+      if (!loaded) return
+      const existing = sheetsRef.current.find((s) => s.libraryEntryId === entry.id)
+      if (existing) {
+        setSheets((prev) =>
+          prev.map((s) =>
+            s.id === existing.id
+              ? {
+                  ...s,
+                  handle: loaded.handle,
+                  history: createHistoryStack(loaded.doc),
+                }
+              : s,
+          ),
+        )
+        setActiveSheetId(existing.id)
+        return
+      }
+      const next = createOpenSheet(loaded.doc, {
+        libraryEntryId: entry.id,
+        handle: loaded.handle,
+      })
+      setSheets((prev) => {
+        if (prev.length === 1 && isBlankSheet(prev[0]!)) {
+          setActiveSheetId(next.id)
+          return [next]
+        }
+        setActiveSheetId(next.id)
+        return [...prev, next]
       })
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Could not open that sheet.', 'error')
     }
+  }
+
+  async function openLibraryFolder(folderId: string) {
+    const entries = entriesInFolder(loadLibraryMeta().entries, folderId)
+    if (!entries.length) {
+      showToast('That folder has no sheets.', 'warn', 4000)
+      return
+    }
+    const opened: OpenSheet[] = []
+    const reloads: { id: string; handle: FileSystemFileHandle; doc: DocState }[] = []
+    let focused: string | null = null
+    for (const entry of entries) {
+      try {
+        const loaded = await loadEntryAsDoc(entry)
+        if (!loaded) continue
+        const existing = sheetsRef.current.find((s) => s.libraryEntryId === entry.id)
+        if (existing) {
+          reloads.push({ id: existing.id, handle: loaded.handle, doc: loaded.doc })
+          if (!focused) focused = existing.id
+          continue
+        }
+        const sheet = createOpenSheet(loaded.doc, {
+          libraryEntryId: entry.id,
+          handle: loaded.handle,
+        })
+        opened.push(sheet)
+        if (!focused) focused = sheet.id
+      } catch {
+        // continue with remaining
+      }
+    }
+    if (!opened.length && !reloads.length) return
+    setSheets((prev) => {
+      let next = prev.map((s) => {
+        const reload = reloads.find((r) => r.id === s.id)
+        if (!reload) return s
+        return {
+          ...s,
+          handle: reload.handle,
+          history: createHistoryStack(reload.doc),
+        }
+      })
+      if (opened.length) {
+        if (next.length === 1 && isBlankSheet(next[0]!)) next = []
+        next = [...next, ...opened]
+      }
+      const id = focused ?? next[next.length - 1]!.id
+      setActiveSheetId(id)
+      return next
+    })
   }
 
   return (
@@ -348,21 +670,31 @@ export default function App() {
         onTitleChange={(next) => set((d) => ({ ...d, title: next }))}
         onLayoutChange={(next) => set((d) => ({ ...d, layout: next }))}
         onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
-        onAddPalette={() =>
-          set((d) => ({
-            ...d,
-            palettes: [...d.palettes, createPalette(`Palette ${d.palettes.length + 1}`)],
-          }))
-        }
-        onFromImage={openFromImage}
-        onImportSheet={openImportPicker}
         onSave={() => void handleSave()}
         saveBusy={saveBusy}
         onEditSlot={onEditSlot}
-        layoutFocus={layoutFocus}
-        onLayoutFocusHandled={() => setLayoutFocus(null)}
         onAddToLibrary={addCurrentToLibrary}
+        onAddPngToLibrary={addPngFileToLibrary}
         onOpenLibraryEntry={(entry) => void openLibraryEntry(entry)}
+        onOpenLibraryFolder={(folderId) => void openLibraryFolder(folderId)}
+        onLinkedLibraryEntry={(entryId) => {
+          setSheets((prev) =>
+            prev.map((s) =>
+              s.id === activeSheetIdRef.current
+                ? { ...s, libraryEntryId: entryId }
+                : s,
+            ),
+          )
+        }}
+        onLibraryTabActiveChange={setLibraryTabActive}
+        openSheets={sheets.map((s) => ({
+          id: s.id,
+          label: sheetTabLabel(s),
+        }))}
+        activeSheetId={activeSheetId}
+        onSelectSheet={setActiveSheetId}
+        onCloseSheet={closeSheet}
+        onNewSheet={addNewSheet}
       />
       <main className="workspace">
         <div className="workspace__stage">
@@ -385,7 +717,6 @@ export default function App() {
             onSheetActiveChange={(active) => {
               sheetActiveRef.current = active
             }}
-            onRequestSheetTitleEdit={() => setLayoutFocus('sheet-title')}
             selectedId={selectedId}
             onSelectedIdChange={setSelectedId}
             editSlot={editSlot}

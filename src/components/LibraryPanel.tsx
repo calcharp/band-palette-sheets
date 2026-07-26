@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   addLibraryEntry,
   canRedoLibrary,
@@ -8,30 +9,44 @@ import {
   entriesInFolder,
   foldersInParent,
   isLibraryFolderWithin,
+  loadEntryThumb,
+  loadFileHandle,
   loadLibraryMeta,
+  makeLibraryPreview,
   moveLibraryEntry,
   moveLibraryFolder,
   redoLibrary,
   removeLibraryEntry,
   renameLibraryEntry,
   renameLibraryFolder,
+  storeEntryThumb,
   storeFileHandle,
   undoLibrary,
   type LibraryEntry,
-  type LibraryFolder,
   type LibraryMeta,
 } from '../lib/library'
 
 interface LibraryPanelProps {
   /** When true, refresh meta from storage (e.g. tab became active). */
   active?: boolean
-  /** Save current sheet if needed, then return handle + display name + fileName. */
-  onAddCurrent: (folderId: string | null) => Promise<{
+  /** Save the currently open sheet (if needed), then return handle + names for library. */
+  onAddCurrentSheet: (folderId: string | null) => Promise<{
     name: string
     fileName: string
     handle: FileSystemFileHandle | null
+    preview?: Blob | null
+  } | null>
+  /** Pick an existing Paletter PNG from disk for the library (does not touch the open sheet). */
+  onAddPngFile: (folderId: string | null) => Promise<{
+    name: string
+    fileName: string
+    handle: FileSystemFileHandle | null
+    preview?: Blob | null
   } | null>
   onOpenEntry: (entry: LibraryEntry) => void
+  onOpenFolder: (folderId: string | null) => void
+  /** Called after the current sheet is added as a library entry. */
+  onLinkedEntry?: (entryId: string) => void
   addBusy?: boolean
 }
 
@@ -45,23 +60,26 @@ type DragPayload =
   | { kind: 'entry'; id: string }
 
 const DND_MIME = 'application/x-paletter-library'
+const ROOT_KEY = '__root__'
 
 /** Drop onto a folder id, or null for library root. */
 type DropTarget = string | null
 
 export function LibraryPanel({
   active = true,
-  onAddCurrent,
+  onAddCurrentSheet,
+  onAddPngFile,
   onOpenEntry,
+  onOpenFolder,
+  onLinkedEntry,
   addBusy = false,
 }: LibraryPanelProps) {
   const [meta, setMeta] = useState<LibraryMeta>(() => loadLibraryMeta())
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([ROOT_KEY]))
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState(false)
   const [menuId, setMenuId] = useState<string | null>(null)
-  const [addOpen, setAddOpen] = useState(false)
   const [dragging, setDragging] = useState<DragPayload | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | undefined>(undefined)
 
@@ -70,7 +88,6 @@ export function LibraryPanel({
     setMeta(loadLibraryMeta())
     setDraft(null)
     setMenuId(null)
-    setAddOpen(false)
     setDragging(null)
     setDropTarget(undefined)
   }, [active])
@@ -79,9 +96,8 @@ export function LibraryPanel({
     if (!active) return
     function onDoc(e: MouseEvent) {
       const t = e.target as HTMLElement | null
-      if (!t?.closest('.library-menu, .library-row__more, .library-add')) {
+      if (!t?.closest('.library-menu, .library-row__more')) {
         setMenuId(null)
-        setAddOpen(false)
       }
     }
     document.addEventListener('mousedown', onDoc)
@@ -116,7 +132,6 @@ export function LibraryPanel({
         setMenuId(null)
       }
     }
-    // Capture so library undo wins over document history while this tab is open.
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [active])
@@ -125,30 +140,28 @@ export function LibraryPanel({
     setMeta(loadLibraryMeta())
   }
 
-  function toggleExpanded(id: string) {
+  function folderKey(folderId: string | null) {
+    return folderId ?? ROOT_KEY
+  }
+
+  function toggleExpanded(folderId: string | null) {
+    const key = folderKey(folderId)
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
 
-  function ensureExpanded(id: string) {
+  function ensureExpanded(folderId: string | null) {
+    const key = folderKey(folderId)
     setExpanded((prev) => {
-      if (prev.has(id)) return prev
+      if (prev.has(key)) return prev
       const next = new Set(prev)
-      next.add(id)
+      next.add(key)
       return next
     })
-  }
-
-  /** Top-level folder from the + menu. Nest via folder menu or drag. */
-  function startNewFolder() {
-    setDraft({ kind: 'folder', parentId: null, name: 'New folder' })
-    setSelectedFolderId(null)
-    setMenuId(null)
-    setAddOpen(false)
   }
 
   function commitDraft() {
@@ -156,10 +169,9 @@ export function LibraryPanel({
     if (draft.kind === 'folder') {
       const name = draft.name.trim() || 'New folder'
       const folder = createLibraryFolder(name, draft.parentId)
-      if (draft.parentId) {
-        setExpanded((prev) => new Set(prev).add(draft.parentId!))
-      }
+      ensureExpanded(draft.parentId)
       setExpanded((prev) => new Set(prev).add(folder.id))
+      setSelectedFolderId(folder.id)
     } else if (draft.kind === 'rename-folder') {
       renameLibraryFolder(draft.id, draft.name.trim() || 'Untitled folder')
     } else {
@@ -173,23 +185,29 @@ export function LibraryPanel({
     setDraft(null)
   }
 
-  async function handleAddSheet() {
+  async function addEntryFrom(source: 'current' | 'png', folderId: string | null) {
     if (busy || addBusy) return
     setBusy(true)
     setMenuId(null)
-    setAddOpen(false)
     try {
-      const result = await onAddCurrent(selectedFolderId)
+      const result =
+        source === 'current'
+          ? await onAddCurrentSheet(folderId)
+          : await onAddPngFile(folderId)
       if (!result) return
       const entry = addLibraryEntry({
         name: result.name,
-        folderId: selectedFolderId,
+        folderId,
         fileName: result.fileName,
       })
-      if (result.handle) await storeFileHandle(entry.id, result.handle)
-      if (selectedFolderId) {
-        setExpanded((prev) => new Set(prev).add(selectedFolderId))
+      if (result.handle) {
+        await storeFileHandle(entry.id, result.handle, result.preview)
+      } else if (result.preview) {
+        await storeEntryThumb(entry.id, await makeLibraryPreview(result.preview))
       }
+      if (source === 'current') onLinkedEntry?.(entry.id)
+      ensureExpanded(folderId)
+      setSelectedFolderId(folderId)
       refresh()
     } finally {
       setBusy(false)
@@ -218,7 +236,7 @@ export function LibraryPanel({
       moveLibraryEntry(dragging.id, target)
     } else {
       moveLibraryFolder(dragging.id, target)
-      if (target) setExpanded((prev) => new Set(prev).add(target))
+      ensureExpanded(target)
     }
     refresh()
   }
@@ -228,140 +246,55 @@ export function LibraryPanel({
     setDropTarget(undefined)
   }
 
-  const locationLabel =
-    selectedFolderId == null
-      ? 'Library'
-      : meta.folders.find((f) => f.id === selectedFolderId)?.name ?? 'Library'
+  const folderHandlers = {
+    onSelectFolder: setSelectedFolderId,
+    onToggle: toggleExpanded,
+    onEnsureExpanded: ensureExpanded,
+    onOpenEntry,
+    onOpenFolder,
+    onAddOpenSheet: (folderId: string | null) => void addEntryFrom('current', folderId),
+    onAddPng: (folderId: string | null) => void addEntryFrom('png', folderId),
+    addBusy: busy || addBusy,
+    onSetDraft: setDraft,
+    onSetMenuId: setMenuId,
+    onCommitDraft: commitDraft,
+    onCancelDraft: cancelDraft,
+    onRefresh: refresh,
+    onDragStart: (payload: DragPayload) => setDragging(payload),
+    onDragEnd,
+    onSetDropTarget: setDropTarget,
+    onDropOn: applyDrop,
+  }
 
   return (
     <div className="library-panel">
       <div
-        className={`library-add ${addOpen ? 'library-add--open' : ''}`}
-        onMouseEnter={() => setAddOpen(true)}
-        onMouseLeave={() => setAddOpen(false)}
-      >
-        <button
-          type="button"
-          className="library-add__btn"
-          aria-label={`Add to ${locationLabel}`}
-          aria-expanded={addOpen}
-          aria-haspopup="menu"
-          disabled={busy || addBusy}
-          onClick={() => setAddOpen((v) => !v)}
-          title={`Add to ${locationLabel}`}
-        >
-          {busy || addBusy ? '…' : '+'}
-        </button>
-        {addOpen ? (
-          <div className="library-add__menu" role="menu">
-            <button type="button" role="menuitem" onClick={startNewFolder}>
-              New folder
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={busy || addBusy}
-              onClick={() => void handleAddSheet()}
-            >
-              Add sheet
-            </button>
-          </div>
-        ) : null}
-      </div>
-
-      <div
-        className={`library-tree ${
-          dropTarget === null ? 'library-tree--drop' : ''
-        } ${dragging ? 'library-tree--dragging' : ''}`}
+        className={`library-tree ${dragging ? 'library-tree--dragging' : ''}`}
         role="tree"
         aria-label="Library folders and sheets"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) setSelectedFolderId(null)
-        }}
-        onDragOver={(e) => {
-          if (!dragging) return
-          e.preventDefault()
-          e.dataTransfer.dropEffect = canDropOn(null) ? 'move' : 'none'
-          setDropTarget(null)
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
-          setDropTarget((cur) => (cur === null ? undefined : cur))
-        }}
-        onDrop={(e) => {
-          e.preventDefault()
-          applyDrop(null)
-          onDragEnd()
-        }}
       >
-        {draft?.kind === 'folder' && draft.parentId === null ? (
-          <DraftNameRow
-            depth={0}
-            icon="folder"
-            value={draft.name}
-            onChange={(name) => setDraft({ ...draft, name })}
-            onCommit={commitDraft}
-            onCancel={cancelDraft}
-          />
-        ) : null}
-
-        {foldersInParent(meta.folders, null).map((folder) => (
-          <FolderBranch
-            key={folder.id}
-            folder={folder}
-            depth={0}
-            meta={meta}
-            selectedFolderId={selectedFolderId}
-            expanded={expanded}
-            draft={draft}
-            menuId={menuId}
-            dragging={dragging}
-            dropTarget={dropTarget}
-            canDropOn={canDropOn}
-            onSelectFolder={setSelectedFolderId}
-            onToggle={toggleExpanded}
-            onEnsureExpanded={ensureExpanded}
-            onOpenEntry={onOpenEntry}
-            onSetDraft={setDraft}
-            onSetMenuId={setMenuId}
-            onCommitDraft={commitDraft}
-            onCancelDraft={cancelDraft}
-            onRefresh={refresh}
-            onDragStart={(payload) => setDragging(payload)}
-            onDragEnd={onDragEnd}
-            onSetDropTarget={setDropTarget}
-            onDropOn={applyDrop}
-          />
-        ))}
-
-        {entriesInFolder(meta.entries, null).map((entry) => (
-          <EntryTreeRow
-            key={entry.id}
-            entry={entry}
-            depth={0}
-            draft={draft}
-            menuId={menuId}
-            dragging={dragging}
-            canDropOn={canDropOn}
-            onOpen={() => onOpenEntry(entry)}
-            onSetDraft={setDraft}
-            onSetMenuId={setMenuId}
-            onCommitDraft={commitDraft}
-            onCancelDraft={cancelDraft}
-            onRefresh={refresh}
-            onDragStart={(payload) => setDragging(payload)}
-            onDragEnd={onDragEnd}
-            onSetDropTarget={setDropTarget}
-            onDropOn={applyDrop}
-          />
-        ))}
+        <FolderBranch
+          folderId={null}
+          folderName="Root"
+          depth={0}
+          meta={meta}
+          selectedFolderId={selectedFolderId}
+          expanded={expanded}
+          draft={draft}
+          menuId={menuId}
+          dragging={dragging}
+          dropTarget={dropTarget}
+          canDropOn={canDropOn}
+          {...folderHandlers}
+        />
       </div>
     </div>
   )
 }
 
 function FolderBranch({
-  folder,
+  folderId,
+  folderName,
   depth,
   meta,
   selectedFolderId,
@@ -375,6 +308,10 @@ function FolderBranch({
   onToggle,
   onEnsureExpanded,
   onOpenEntry,
+  onOpenFolder,
+  onAddOpenSheet,
+  onAddPng,
+  addBusy: folderAddBusy,
   onSetDraft,
   onSetMenuId,
   onCommitDraft,
@@ -385,7 +322,8 @@ function FolderBranch({
   onSetDropTarget,
   onDropOn,
 }: {
-  folder: LibraryFolder
+  folderId: string | null
+  folderName: string
   depth: number
   meta: LibraryMeta
   selectedFolderId: string | null
@@ -396,9 +334,13 @@ function FolderBranch({
   dropTarget: DropTarget | undefined
   canDropOn: (target: DropTarget) => boolean
   onSelectFolder: (id: string | null) => void
-  onToggle: (id: string) => void
-  onEnsureExpanded: (id: string) => void
+  onToggle: (id: string | null) => void
+  onEnsureExpanded: (id: string | null) => void
   onOpenEntry: (entry: LibraryEntry) => void
+  onOpenFolder: (folderId: string | null) => void
+  onAddOpenSheet: (folderId: string | null) => void
+  onAddPng: (folderId: string | null) => void
+  addBusy: boolean
   onSetDraft: (d: Draft | null) => void
   onSetMenuId: (id: string | null) => void
   onCommitDraft: () => void
@@ -409,16 +351,20 @@ function FolderBranch({
   onSetDropTarget: (target: DropTarget | undefined) => void
   onDropOn: (target: DropTarget) => void
 }) {
-  const isExpanded = expanded.has(folder.id)
-  const childFolders = foldersInParent(meta.folders, folder.id)
-  const childEntries = entriesInFolder(meta.entries, folder.id)
-  const renaming = draft?.kind === 'rename-folder' && draft.id === folder.id
-  const isDrop = dropTarget === folder.id && canDropOn(folder.id)
-  const isDraggingSelf = dragging?.kind === 'folder' && dragging.id === folder.id
+  const isRoot = folderId === null
+  const key = folderId ?? ROOT_KEY
+  const isExpanded = expanded.has(key)
+  const childFolders = foldersInParent(meta.folders, folderId)
+  const childEntries = entriesInFolder(meta.entries, folderId)
+  const renaming =
+    !isRoot && draft?.kind === 'rename-folder' && draft.id === folderId
+  const isDrop = dropTarget === folderId && canDropOn(folderId)
+  const isDraggingSelf =
+    !isRoot && dragging?.kind === 'folder' && dragging.id === folderId
 
   return (
     <div className={`library-branch ${isDraggingSelf ? 'library-branch--dragging' : ''}`}>
-      {renaming && draft.kind === 'rename-folder' ? (
+      {renaming && draft?.kind === 'rename-folder' ? (
         <DraftNameRow
           depth={depth}
           icon="folder"
@@ -429,36 +375,41 @@ function FolderBranch({
         />
       ) : (
         <TreeFolderRow
-          label={folder.name}
+          label={folderName}
           depth={depth}
-          selected={selectedFolderId === folder.id}
+          selected={selectedFolderId === folderId}
           expanded={isExpanded}
-          menuOpen={menuId === folder.id}
+          menuOpen={menuId === key}
           dropActive={isDrop}
+          draggable={!isRoot}
           onSelect={() => {
-            onSelectFolder(folder.id)
-            if (!isExpanded) onToggle(folder.id)
+            onSelectFolder(folderId)
+            if (!isExpanded) onToggle(folderId)
           }}
-          onToggle={() => onToggle(folder.id)}
-          onToggleMenu={() => onSetMenuId(menuId === folder.id ? null : folder.id)}
+          onToggle={() => onToggle(folderId)}
+          onToggleMenu={() => onSetMenuId(menuId === key ? null : key)}
           onDragStart={(e) => {
-            e.dataTransfer.setData(DND_MIME, JSON.stringify({ kind: 'folder', id: folder.id }))
+            if (isRoot || !folderId) {
+              e.preventDefault()
+              return
+            }
+            e.dataTransfer.setData(DND_MIME, JSON.stringify({ kind: 'folder', id: folderId }))
             e.dataTransfer.effectAllowed = 'move'
-            onDragStart({ kind: 'folder', id: folder.id })
+            onDragStart({ kind: 'folder', id: folderId })
           }}
           onDragEnd={onDragEnd}
           onDragOver={(e) => {
             if (!dragging) return
             e.preventDefault()
             e.stopPropagation()
-            e.dataTransfer.dropEffect = canDropOn(folder.id) ? 'move' : 'none'
-            onSetDropTarget(folder.id)
-            if (canDropOn(folder.id)) onEnsureExpanded(folder.id)
+            e.dataTransfer.dropEffect = canDropOn(folderId) ? 'move' : 'none'
+            onSetDropTarget(folderId)
+            if (canDropOn(folderId)) onEnsureExpanded(folderId)
           }}
           onDrop={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            onDropOn(folder.id)
+            onDropOn(folderId)
             onDragEnd()
           }}
           menu={
@@ -468,42 +419,86 @@ function FolderBranch({
                 role="menuitem"
                 onClick={() => {
                   onSetMenuId(null)
-                  onSetDraft({ kind: 'rename-folder', id: folder.id, name: folder.name })
+                  onOpenFolder(folderId)
                 }}
               >
-                Rename
+                Open all sheets
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={folderAddBusy}
+                onClick={() => {
+                  onSetMenuId(null)
+                  onAddOpenSheet(folderId)
+                }}
+              >
+                Add open sheet
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={folderAddBusy}
+                onClick={() => {
+                  onSetMenuId(null)
+                  onAddPng(folderId)
+                }}
+              >
+                From PNG…
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   onSetMenuId(null)
-                  onSelectFolder(folder.id)
-                  if (!isExpanded) onToggle(folder.id)
-                  onSetDraft({ kind: 'folder', parentId: folder.id, name: 'New folder' })
+                  onSelectFolder(folderId)
+                  onEnsureExpanded(folderId)
+                  onSetDraft({
+                    kind: 'folder',
+                    parentId: folderId,
+                    name: 'New folder',
+                  })
                 }}
               >
                 New folder inside
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="library-menu__danger"
-                onClick={() => {
-                  onSetMenuId(null)
-                  if (
-                    window.confirm(
-                      `Delete folder “${folder.name}”? Sheets inside move to Library root.`,
-                    )
-                  ) {
-                    deleteLibraryFolder(folder.id)
-                    if (selectedFolderId === folder.id) onSelectFolder(null)
-                    onRefresh()
-                  }
-                }}
-              >
-                Delete folder
-              </button>
+              {!isRoot && folderId ? (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onSetMenuId(null)
+                      onSetDraft({
+                        kind: 'rename-folder',
+                        id: folderId,
+                        name: folderName,
+                      })
+                    }}
+                  >
+                    Rename
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="library-menu__danger"
+                    onClick={() => {
+                      onSetMenuId(null)
+                      if (
+                        window.confirm(
+                          `Delete folder “${folderName}”? Sheets inside move to Root.`,
+                        )
+                      ) {
+                        deleteLibraryFolder(folderId)
+                        if (selectedFolderId === folderId) onSelectFolder(null)
+                        onRefresh()
+                      }
+                    }}
+                  >
+                    Delete folder
+                  </button>
+                </>
+              ) : null}
             </div>
           }
         />
@@ -511,7 +506,7 @@ function FolderBranch({
 
       {isExpanded ? (
         <>
-          {draft?.kind === 'folder' && draft.parentId === folder.id ? (
+          {draft?.kind === 'folder' && draft.parentId === folderId ? (
             <DraftNameRow
               depth={depth + 1}
               icon="folder"
@@ -525,7 +520,8 @@ function FolderBranch({
           {childFolders.map((child) => (
             <FolderBranch
               key={child.id}
-              folder={child}
+              folderId={child.id}
+              folderName={child.name}
               depth={depth + 1}
               meta={meta}
               selectedFolderId={selectedFolderId}
@@ -539,6 +535,10 @@ function FolderBranch({
               onToggle={onToggle}
               onEnsureExpanded={onEnsureExpanded}
               onOpenEntry={onOpenEntry}
+              onOpenFolder={onOpenFolder}
+              onAddOpenSheet={onAddOpenSheet}
+              onAddPng={onAddPng}
+              addBusy={folderAddBusy}
               onSetDraft={onSetDraft}
               onSetMenuId={onSetMenuId}
               onCommitDraft={onCommitDraft}
@@ -585,6 +585,7 @@ function TreeFolderRow({
   expanded,
   menuOpen = false,
   dropActive = false,
+  draggable = true,
   onSelect,
   onToggle,
   onToggleMenu,
@@ -600,6 +601,7 @@ function TreeFolderRow({
   expanded: boolean
   menuOpen?: boolean
   dropActive?: boolean
+  draggable?: boolean
   onSelect: () => void
   onToggle: () => void
   onToggleMenu?: () => void
@@ -618,7 +620,7 @@ function TreeFolderRow({
       role="treeitem"
       aria-selected={selected}
       aria-expanded={expanded}
-      draggable
+      draggable={draggable}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onDragOver={onDragOver}
@@ -736,7 +738,7 @@ function EntryTreeRow({
     >
       <span className="library-row__chevron-spacer" />
       <button type="button" className="library-row__main" onClick={onOpen}>
-        <SheetGlyph />
+        <SheetThumb entryId={entry.id} label={entry.name} />
         <span className="library-row__text">
           <span className="library-row__name">{entry.name}</span>
           <span className="library-row__file">{entry.fileName}</span>
@@ -846,6 +848,103 @@ function DraftNameRow({
         }}
       />
     </div>
+  )
+}
+
+function SheetThumb({ entryId, label }: { entryId: string; label: string }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [hover, setHover] = useState<{ left: number; top: number } | null>(null)
+  const wrapRef = useRef<HTMLSpanElement>(null)
+  const urlRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      let blob = await loadEntryThumb(entryId)
+      if (!blob) {
+        try {
+          const handle = await loadFileHandle(entryId)
+          if (!handle) return
+          const query = await handle.queryPermission({ mode: 'read' })
+          if (query !== 'granted') return
+          const file = await handle.getFile()
+          blob = await makeLibraryPreview(file)
+          await storeEntryThumb(entryId, blob)
+        } catch {
+          return
+        }
+      }
+      if (cancelled || !blob) return
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
+      const next = URL.createObjectURL(blob)
+      urlRef.current = next
+      setUrl(next)
+    }
+
+    void load()
+
+    function onThumbUpdated(e: Event) {
+      const id = (e as CustomEvent<{ entryId: string }>).detail?.entryId
+      if (id === entryId) void load()
+    }
+    window.addEventListener('paletter-library-thumb', onThumbUpdated)
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('paletter-library-thumb', onThumbUpdated)
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current)
+        urlRef.current = null
+      }
+    }
+  }, [entryId])
+
+  function showHover() {
+    const el = wrapRef.current
+    if (!el || !url) return
+    const rect = el.getBoundingClientRect()
+    const previewW = 200
+    const previewH = 200
+    const gap = 10
+    let left = rect.right + gap
+    let top = rect.top + rect.height / 2 - previewH / 2
+    if (left + previewW > window.innerWidth - 8) {
+      left = rect.left - previewW - gap
+    }
+    if (top < 8) top = 8
+    if (top + previewH > window.innerHeight - 8) {
+      top = window.innerHeight - previewH - 8
+    }
+    setHover({ left, top })
+  }
+
+  if (!url) return <SheetGlyph />
+
+  return (
+    <span
+      ref={wrapRef}
+      className="library-thumb"
+      onMouseEnter={showHover}
+      onMouseLeave={() => setHover(null)}
+      onFocus={showHover}
+      onBlur={() => setHover(null)}
+    >
+      <img className="library-thumb__img" src={url} alt="" draggable={false} />
+      {hover
+        ? createPortal(
+            <div
+              className="library-thumb__zoom"
+              style={{ left: hover.left, top: hover.top }}
+              role="img"
+              aria-label={`Preview of ${label}`}
+            >
+              <img src={url} alt="" draggable={false} />
+            </div>,
+            document.body,
+          )
+        : null}
+    </span>
   )
 }
 
