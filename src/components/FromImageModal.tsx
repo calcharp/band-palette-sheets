@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { clipboardImageLabel, imageFilesFromDataTransfer } from '../lib/clipboardImage'
+import { sourcePathFromDrop } from '../lib/imageRef'
 import {
   cloneImageData,
   cropEllipse,
@@ -26,6 +28,14 @@ export interface FromImageResume {
   name: string
   image: ImageData
   picks: PixelColor[]
+  sourcePath?: string
+}
+
+/** New from-image session started with an already-decoded bitmap. */
+export interface FromImageSeed {
+  name: string
+  image: ImageData
+  sourcePath?: string
 }
 
 interface FromImageModalProps {
@@ -34,6 +44,10 @@ interface FromImageModalProps {
   onSave: (palette: Palette) => void
   /** Reopen an existing from-image palette with its source loaded. */
   resume?: FromImageResume | null
+  /** Start a new session with this image already loaded. */
+  seed?: FromImageSeed | null
+  /** Drag-drop loaded an image but the browser hid the filesystem path. */
+  onDropMissingPath?: () => void
 }
 
 interface ViewState {
@@ -67,7 +81,14 @@ const MAX_ZOOM = 12
 const SEED_COUNT = 4
 const MAX_PICK_HISTORY = 60
 
-export function FromImageModal({ open, onClose, onSave, resume = null }: FromImageModalProps) {
+export function FromImageModal({
+  open,
+  onClose,
+  onSave,
+  resume = null,
+  seed = null,
+  onDropMissingPath,
+}: FromImageModalProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -85,12 +106,15 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
   const imageRef = useRef<ImageData | null>(null)
   const picksRef = useRef<PixelColor[]>([])
   const selectedRef = useRef<number | null>(null)
+  const fileNameRef = useRef('Image')
+  const sourcePathRef = useRef<string | undefined>(undefined)
   const pastRef = useRef<HistorySnap[]>([])
   const futureRef = useRef<HistorySnap[]>([])
   const editingIdRef = useRef<string | null>(null)
 
   const [image, setImage] = useState<ImageData | null>(null)
   const [fileName, setFileName] = useState('Image')
+  const [sourcePath, setSourcePath] = useState<string | undefined>(undefined)
   const [picks, setPicks] = useState<PixelColor[]>([])
   const [selected, setSelected] = useState<number | null>(null)
   const [sortState, setSortState] = useState<{ key: FromImageSortKey; dir: 1 | -1 } | null>(null)
@@ -107,6 +131,8 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
   imageRef.current = image
   picksRef.current = picks
   selectedRef.current = selected
+  fileNameRef.current = fileName
+  sourcePathRef.current = sourcePath
   editingIdRef.current = editingId
 
   void historyTick
@@ -125,6 +151,7 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
       setImage(cloneImageData(resume.image))
       setPicks(structuredClone(resume.picks))
       setFileName(resume.name || 'Image')
+      setSourcePath(resume.sourcePath)
       setSelected(null)
       setSortState(null)
       setError(null)
@@ -137,11 +164,50 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
       pastRef.current = []
       futureRef.current = []
       setHistoryTick((n) => n + 1)
-    } else {
-      editingIdRef.current = null
-      setEditingId(null)
+      return
     }
-  }, [open, resume])
+
+    editingIdRef.current = null
+    setEditingId(null)
+
+    if (seed) {
+      const seeds = seedPaletteFromImage(seed.image, SEED_COUNT)
+      setImage(cloneImageData(seed.image))
+      setPicks(seeds)
+      setSelected(seeds.length ? 0 : null)
+      setFileName(seed.name || 'Image')
+      setSourcePath(seed.sourcePath)
+      setSortState(null)
+      setError(null)
+      setView({ fit: 1, zoom: 1, panX: 0, panY: 0 })
+      setHover(null)
+      setTool('pick')
+      spaceHeld.current = false
+      setSpaceDown(false)
+      cropDrag.current = null
+      pastRef.current = []
+      futureRef.current = []
+      setHistoryTick((n) => n + 1)
+      return
+    }
+
+    setImage(null)
+    setPicks([])
+    setSelected(null)
+    setFileName('Image')
+    setSourcePath(undefined)
+    setSortState(null)
+    setError(null)
+    setView({ fit: 1, zoom: 1, panX: 0, panY: 0 })
+    setHover(null)
+    setTool('pick')
+    spaceHeld.current = false
+    setSpaceDown(false)
+    cropDrag.current = null
+    pastRef.current = []
+    futureRef.current = []
+    setHistoryTick((n) => n + 1)
+  }, [open, resume, seed])
 
   function pushHistory() {
     const img = imageRef.current
@@ -189,80 +255,6 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
     setHistoryTick((n) => n + 1)
     return true
   }
-
-  useEffect(() => {
-    if (!open) return
-    function onPaste(e: ClipboardEvent) {
-      const items = e.clipboardData?.items
-      if (!items) return
-      for (const item of items) {
-        if (!item.type.startsWith('image/')) continue
-        const file = item.getAsFile()
-        if (!file) continue
-        e.preventDefault()
-        void ingest(file, 'Pasted')
-        return
-      }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        if (cropDrag.current) {
-          cropDrag.current = null
-          drawOverlay()
-          e.preventDefault()
-          return
-        }
-        handleClose()
-      }
-
-      const mod = e.ctrlKey || e.metaKey
-      if (mod) {
-        const target = e.target as HTMLElement | null
-        const tag = target?.tagName
-        const inField =
-          tag === 'INPUT' || tag === 'TEXTAREA' || Boolean(target?.isContentEditable)
-        const key = e.key.toLowerCase()
-        if (!inField && key === 'z' && !e.shiftKey) {
-          if (undoHistory()) {
-            e.preventDefault()
-            e.stopImmediatePropagation()
-            return
-          }
-        }
-        if (!inField && key === 'z' && e.shiftKey) {
-          if (redoHistory()) {
-            e.preventDefault()
-            e.stopImmediatePropagation()
-            return
-          }
-        }
-      }
-
-      if (e.code === 'Space' && !e.repeat) {
-        const t = e.target as HTMLElement | null
-        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
-          return
-        }
-        e.preventDefault()
-        spaceHeld.current = true
-        setSpaceDown(true)
-      }
-    }
-    function onKeyUp(e: KeyboardEvent) {
-      if (e.code === 'Space') {
-        spaceHeld.current = false
-        setSpaceDown(false)
-      }
-    }
-    window.addEventListener('paste', onPaste)
-    window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener('keyup', onKeyUp)
-    return () => {
-      window.removeEventListener('paste', onPaste)
-      window.removeEventListener('keydown', onKeyDown, true)
-      window.removeEventListener('keyup', onKeyUp)
-    }
-  }, [open])
 
   useEffect(() => {
     const host = canvasRef.current
@@ -427,12 +419,13 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
     }
   }
 
-  function applyImageData(data: ImageData, label: string) {
+  function applyImageData(data: ImageData, label: string, path?: string) {
     const seeds = seedPaletteFromImage(data, SEED_COUNT)
     setImage(data)
     setPicks(seeds)
     setSelected(seeds.length ? 0 : null)
     setFileName(label)
+    setSourcePath(path)
     setSortState(null)
     setTool('pick')
     cropDrag.current = null
@@ -449,13 +442,13 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
     cropDrag.current = null
   }
 
-  async function ingest(file: File, label?: string) {
+  async function ingest(file: File, label?: string, path?: string) {
     setError(null)
     try {
       const data = await loadImageFile(file)
       const maxSide = 900
       const scale = Math.min(1, maxSide / Math.max(data.width, data.height))
-      const name = (label ?? file.name).replace(/\.[^.]+$/, '') || 'Image'
+      const name = (label ?? clipboardImageLabel(file)).replace(/\.[^.]+$/, '') || 'Image'
       if (scale < 1) {
         const w = Math.max(1, Math.round(data.width * scale))
         const h = Math.max(1, Math.round(data.height * scale))
@@ -469,14 +462,89 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
         tmp.height = data.height
         tmp.getContext('2d')!.putImageData(data, 0, 0)
         ctx.drawImage(tmp, 0, 0, w, h)
-        applyImageData(ctx.getImageData(0, 0, w, h), name)
+        applyImageData(ctx.getImageData(0, 0, w, h), name, path)
       } else {
-        applyImageData(data, name)
+        applyImageData(data, name, path)
       }
     } catch {
       setError('Could not read that image.')
     }
   }
+
+  useEffect(() => {
+    if (!open) return
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (cropDrag.current) {
+          cropDrag.current = null
+          drawOverlay()
+          e.preventDefault()
+          return
+        }
+        handleClose()
+        return
+      }
+
+      if (e.key === 'Enter' && !e.isComposing) {
+        const t = e.target as HTMLElement | null
+        if (t?.tagName === 'SELECT') return
+        if (!imageRef.current || !picksRef.current.length) return
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        handleAdd()
+        return
+      }
+
+      const mod = e.ctrlKey || e.metaKey
+      const key = e.key.toLowerCase()
+
+      if (mod) {
+        const target = e.target as HTMLElement | null
+        const tag = target?.tagName
+        const inField =
+          tag === 'INPUT' || tag === 'TEXTAREA' || Boolean(target?.isContentEditable)
+        if (!inField && key === 'z' && !e.shiftKey) {
+          if (undoHistory()) {
+            e.preventDefault()
+            e.stopImmediatePropagation()
+            return
+          }
+        }
+        if (!inField && key === 'z' && e.shiftKey) {
+          if (redoHistory()) {
+            e.preventDefault()
+            e.stopImmediatePropagation()
+            return
+          }
+        }
+      }
+
+      if (e.code === 'Space' && !e.repeat) {
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+          return
+        }
+        e.preventDefault()
+        spaceHeld.current = true
+        setSpaceDown(true)
+      }
+    }
+
+    function onKeyUp(e: KeyboardEvent) {
+      if (e.code === 'Space') {
+        spaceHeld.current = false
+        setSpaceDown(false)
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [open])
 
   function sheetPoint(e: { clientX: number; clientY: number }) {
     const vp = viewportRef.current
@@ -708,17 +776,20 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
   }
 
   function handleAdd() {
-    if (!picks.length || !image) return
+    const img = imageRef.current
+    const currentPicks = picksRef.current
+    if (!currentPicks.length || !img) return
     const base = createPalette(
-      fileName || 'Image',
-      picks.map((p) => p.hex),
+      fileNameRef.current || 'Image',
+      currentPicks.map((p) => p.hex),
     )
     const id = editingIdRef.current ?? base.id
     onSave({
       ...base,
       id,
-      sourceImage: cloneImageData(image),
-      sourcePicks: structuredClone(picks),
+      sourceImage: cloneImageData(img),
+      sourcePicks: structuredClone(currentPicks),
+      ...(sourcePathRef.current ? { sourcePath: sourcePathRef.current } : {}),
     })
     handleClose()
   }
@@ -731,6 +802,7 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
     setSortState(null)
     setError(null)
     setFileName('Image')
+    setSourcePath(undefined)
     setView({ fit: 1, zoom: 1, panX: 0, panY: 0 })
     setHover(null)
     setTool('pick')
@@ -778,6 +850,27 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
             className={`image-pick__stage from-image__stage ${
               spaceDown ? 'from-image__stage--pan' : ''
             } ${cropping ? 'from-image__stage--crop' : ''}`}
+            onDragOver={(e) => {
+              if (![...e.dataTransfer.types].includes('Files')) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'copy'
+            }}
+            onDrop={(e) => {
+              if (![...e.dataTransfer.types].includes('Files')) return
+              e.preventDefault()
+              const file = imageFilesFromDataTransfer(e.dataTransfer)[0]
+              if (!file) return
+              const path = sourcePathFromDrop(file, e.dataTransfer)
+              if (!path) {
+                onDropMissingPath?.()
+                setError(
+                  'No file path from this drag — sourcePath won’t be saved. Paste a path/URL if you need it in metadata.',
+                )
+              } else {
+                setError(null)
+              }
+              void ingest(file, undefined, path)
+            }}
           >
             {image ? (
               <>
@@ -809,7 +902,9 @@ export function FromImageModal({ open, onClose, onSave, resume = null }: FromIma
                 )}
               </>
             ) : (
-              <p className="modal__empty from-image__empty">Upload an image to begin</p>
+              <p className="modal__empty from-image__empty">
+                Upload an image, or paste a file path / image URL (Ctrl+V)
+              </p>
             )}
 
             {image && (

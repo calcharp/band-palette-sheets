@@ -16,6 +16,8 @@ export interface Palette {
   sourceImage?: ImageData
   /** Eyedropper picks with positions, matching `colors` when saved from image. */
   sourcePicks?: PaletteSourcePick[]
+  /** Absolute local path or http(s) URL the source image was loaded from. */
+  sourcePath?: string
 }
 
 export interface SheetLayout {
@@ -32,6 +34,14 @@ export interface SheetLayout {
   namePosition: NamePosition
   /** Space between name label and stripes (px). */
   nameGap: number
+  /** Sheet title font size (px). */
+  titleSize: number
+  /** Space between sheet title and palette grid (px). */
+  titleGap: number
+  /** Horizontal offset of sheet title from center (px). */
+  titleHAdjust: number
+  /** Vertical offset of sheet title from default top (px). */
+  titleVAdjust: number
   /** Outer margin around the sheet (px). */
   padding: number
   /** Background behind the sheet. */
@@ -48,6 +58,10 @@ export const DEFAULT_LAYOUT: SheetLayout = {
   bandWidth: 220,
   namePosition: 'above',
   nameGap: 10,
+  titleSize: 28,
+  titleGap: 28,
+  titleHAdjust: 0,
+  titleVAdjust: 0,
   padding: 48,
   background: '#ffffff',
   showHexLabels: true,

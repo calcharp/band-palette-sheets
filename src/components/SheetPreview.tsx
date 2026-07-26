@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { imageFilesFromDataTransfer } from '../lib/clipboardImage'
+import { sourcePathFromDrop } from '../lib/imageRef'
 import { simplifyPalette, type ClusterReduce } from '../lib/imagePalette'
 import { normalizeHex, parseHex, sortColors, type ColorSortKey } from '../lib/palette'
 import {
@@ -17,10 +19,20 @@ import { ColorPanel } from './ColorPanel'
 import { PalettePanel } from './PalettePanel'
 
 interface SheetPreviewProps {
+  title: string
   palettes: Palette[]
   layout: SheetLayout
+  onTitleChange: (title: string) => void
   onPalettesChange: (palettes: Palette[]) => void
   onAddPalette: () => void
+  onFromImage: () => void
+  onImportSheet: () => void
+  onImportPng: (file: File, sourcePath?: string) => void
+  /** Drag-drop loaded an image but the browser hid the filesystem path. */
+  onDropMissingPath?: () => void
+  /** Fired when the sheet gains/loses “last clicked” status for paste. */
+  onSheetActiveChange?: (active: boolean) => void
+  onRequestSheetTitleEdit: () => void
   selectedId: string | null
   onSelectedIdChange: (id: string | null) => void
   editSlot: HTMLDivElement | null
@@ -34,6 +46,12 @@ type NameEdit = {
   box: Rect
 }
 
+type SheetTitleEdit = {
+  kind: 'sheet-title'
+  value: string
+  box: Rect
+}
+
 type ColorEdit = {
   kind: 'color'
   paletteId: string
@@ -42,7 +60,7 @@ type ColorEdit = {
   box: Rect
 }
 
-type ActiveEdit = NameEdit | ColorEdit
+type ActiveEdit = NameEdit | ColorEdit | SheetTitleEdit
 
 type DragState = {
   paletteId: string
@@ -57,10 +75,18 @@ type DragState = {
 const DRAG_THRESHOLD = 6
 
 export function SheetPreview({
+  title,
   palettes,
   layout,
+  onTitleChange,
   onPalettesChange,
   onAddPalette,
+  onFromImage,
+  onImportSheet,
+  onImportPng,
+  onDropMissingPath,
+  onSheetActiveChange,
+  onRequestSheetTitleEdit,
   selectedId,
   onSelectedIdChange,
   editSlot,
@@ -73,6 +99,8 @@ export function SheetPreview({
   const inputRef = useRef<HTMLInputElement>(null)
   const editRef = useRef<ActiveEdit | null>(null)
   const dragRef = useRef<DragState | null>(null)
+  const onSheetActiveChangeRef = useRef(onSheetActiveChange)
+  onSheetActiveChangeRef.current = onSheetActiveChange
   const pendingDrag = useRef<{
     paletteId: string
     index: number
@@ -82,12 +110,19 @@ export function SheetPreview({
     offsetY: number
   } | null>(null)
   const pendingDeselect = useRef(false)
+  const selectedIdRef = useRef(selectedId)
+  const editSlotRef = useRef(editSlot)
+  const deselectPaletteRef = useRef<() => void>(() => {})
+  selectedIdRef.current = selectedId
+  editSlotRef.current = editSlot
 
   const [edit, setEdit] = useState<ActiveEdit | null>(null)
   const [displayScale, setDisplayScale] = useState(1)
   const [hits, setHits] = useState<PaletteHit[]>([])
+  const [titleHit, setTitleHit] = useState<Rect | null>(null)
   const [hoverId, setHoverId] = useState<string | null>(null)
   const [hoverAdd, setHoverAdd] = useState(false)
+  const [hoverTitle, setHoverTitle] = useState(false)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [sortState, setSortState] = useState<
     Record<string, { key: ColorSortKey; dir: 1 | -1 }>
@@ -112,6 +147,16 @@ export function SheetPreview({
       setSimplifyReduce('mean')
     }
   }, [selectedId, palettes])
+
+  useEffect(() => {
+    function onPointerDown(e: PointerEvent) {
+      const frame = frameRef.current
+      const active = Boolean(frame?.contains(e.target as Node))
+      onSheetActiveChangeRef.current?.(active)
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    return () => window.removeEventListener('pointerdown', onPointerDown, true)
+  }, [])
 
   const displayPalettes = useMemo(() => {
     let next = palettes
@@ -141,15 +186,80 @@ export function SheetPreview({
     return next
   }, [palettes, edit, selectedId, simplifyLive, simplifyK, simplifyReduce])
 
+  const displayPalettesRef = useRef(displayPalettes)
+  const layoutRef = useRef(layout)
+  const titleRef = useRef(title)
+  displayPalettesRef.current = displayPalettes
+  layoutRef.current = layout
+  titleRef.current = title
+
+  useEffect(() => {
+    function sheetPointFromClient(clientX: number, clientY: number) {
+      const host = canvasRef.current
+      if (!host) return null
+      const rect = host.getBoundingClientRect()
+      if (!rect.width || !rect.height) return null
+      const { w, h } = sheetLogicalRef.current
+      return {
+        x: ((clientX - rect.left) / rect.width) * w,
+        y: ((clientY - rect.top) / rect.height) * h,
+      }
+    }
+
+    function onPointerDown(e: PointerEvent) {
+      if (e.button !== 0) return
+      const sel = selectedIdRef.current
+      if (!sel) return
+
+      const target = e.target as HTMLElement | null
+      if (!target) return
+
+      // Keep selection while using the edit detail panel / color tools.
+      const slot = editSlotRef.current
+      if (slot?.contains(target)) return
+      if (target.closest('.modal, .modal-backdrop')) return
+      if (target.closest('.preview__editor, .preview__name-input')) return
+      if (target.closest('.preview__delete')) return
+
+      const canvas = canvasRef.current
+      const onCanvas = Boolean(canvas && (target === canvas || canvas.contains(target)))
+      if (onCanvas) {
+        const pt = sheetPointFromClient(e.clientX, e.clientY)
+        if (pt) {
+          const cell = cellAtPoint(
+            pt.x,
+            pt.y,
+            displayPalettesRef.current,
+            layoutRef.current,
+            titleRef.current,
+          )
+          // Click on any palette cell: keep current selection until click/drag resolves.
+          if (cell) return
+        }
+        pendingDeselect.current = false
+        deselectPaletteRef.current()
+        return
+      }
+
+      // Frame padding, add chrome, workspace, toolbar, etc.
+      pendingDeselect.current = false
+      deselectPaletteRef.current()
+    }
+
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [])
+
   useEffect(() => {
     const host = canvasRef.current
     if (!host) return
-    const info = computeSheetHits(displayPalettes, layout)
+    const info = computeSheetHits(displayPalettes, layout, title)
     setHits(info.hits)
-    const addSlot = computeAddPaletteSlot(displayPalettes, layout)
+    setTitleHit(info.title)
+    const addSlot = computeAddPaletteSlot(displayPalettes, layout, title)
 
     const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1))
-    const sheet = renderSheet(displayPalettes, layout, dpr)
+    const sheet = renderSheet(displayPalettes, layout, dpr, title, { preview: true })
     const sheetW = sheet.width / dpr
     const sheetH = sheet.height / dpr
     const logicalW = Math.max(sheetW, addSlot.width)
@@ -232,10 +342,24 @@ export function SheetPreview({
       if (hoverAdd) {
         strokePaletteRing(addSlot.cell, 'rgba(170, 170, 170, 0.55)')
       }
+      if (hoverTitle && edit?.kind !== 'sheet-title') {
+        strokePaletteRing(info.title, 'rgba(170, 170, 170, 0.55)')
+      }
     }
 
     updateScale()
-  }, [displayPalettes, layout, drag?.overId, drag?.paletteId, selectedId, hoverId, hoverAdd])
+  }, [
+    displayPalettes,
+    layout,
+    title,
+    drag?.overId,
+    drag?.paletteId,
+    selectedId,
+    hoverId,
+    hoverAdd,
+    hoverTitle,
+    edit?.kind,
+  ])
 
   useEffect(() => {
     const frame = frameRef.current
@@ -246,11 +370,14 @@ export function SheetPreview({
   }, [])
 
   useEffect(() => {
-    if (edit?.kind === 'name') inputRef.current?.select()
-  }, [edit?.kind, edit && edit.kind === 'name' ? edit.paletteId : null])
+    if (edit?.kind === 'name' || edit?.kind === 'sheet-title') inputRef.current?.select()
+  }, [
+    edit?.kind,
+    edit && edit.kind === 'name' ? edit.paletteId : null,
+  ])
 
   useEffect(() => {
-    if (!edit || edit.kind !== 'name') return
+    if (!edit || (edit.kind !== 'name' && edit.kind !== 'sheet-title')) return
     function onPointerDown(e: PointerEvent) {
       const node = editorRef.current
       if (node && !node.contains(e.target as Node)) commitEdit()
@@ -270,7 +397,7 @@ export function SheetPreview({
       document.removeEventListener('pointerdown', onPointerDown)
       document.removeEventListener('keydown', onKey)
     }
-  }, [edit, palettes])
+  }, [edit, palettes, title])
 
   useEffect(() => {
     function onMove(e: PointerEvent) {
@@ -292,6 +419,7 @@ export function SheetPreview({
           if (editRef.current?.kind === 'color') commitEdit()
           setHoverId(null)
           setHoverAdd(false)
+          setHoverTitle(false)
           setDrag(next)
           setEdit(null)
         }
@@ -301,7 +429,7 @@ export function SheetPreview({
       const d = dragRef.current
       if (!d) return
       const pt = clientToSheet(e.clientX, e.clientY)
-      const over = pt ? cellAtPoint(pt.x, pt.y, displayPalettes, layout) : null
+      const over = pt ? cellAtPoint(pt.x, pt.y, displayPalettes, layout, title) : null
       setDrag({
         ...d,
         pointerX: e.clientX,
@@ -338,7 +466,7 @@ export function SheetPreview({
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
     }
-  }, [displayPalettes, layout, onPalettesChange])
+  }, [displayPalettes, layout, title, onPalettesChange])
 
   function updateScale() {
     const host = canvasRef.current
@@ -367,7 +495,9 @@ export function SheetPreview({
   function commitEdit() {
     const next = editRef.current
     if (!next) return
-    if (next.kind === 'name') {
+    if (next.kind === 'sheet-title') {
+      onTitleChange(next.value)
+    } else if (next.kind === 'name') {
       onPalettesChange(
         palettes.map((p) => (p.id === next.paletteId ? { ...p, name: next.value } : p)),
       )
@@ -387,13 +517,29 @@ export function SheetPreview({
   }
 
   function onPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (e.button !== 0 || edit?.kind === 'name') return
+    if (e.button !== 0 || edit?.kind === 'name' || edit?.kind === 'sheet-title') return
     const pt = sheetPoint(e)
     if (!pt) return
-    const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout)
+
+    const titleBox = titleHit ?? computeSheetHits(displayPalettes, layout, title).title
+    const titlePad = 6
+    if (
+      pt.x >= titleBox.x - titlePad &&
+      pt.x <= titleBox.x + titleBox.w + titlePad &&
+      pt.y >= titleBox.y - titlePad &&
+      pt.y <= titleBox.y + titleBox.h + titlePad
+    ) {
+      pendingDrag.current = null
+      pendingDeselect.current = false
+      onRequestSheetTitleEdit()
+      return
+    }
+
+    const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout, title)
     if (!cell) {
       pendingDrag.current = null
-      pendingDeselect.current = true
+      pendingDeselect.current = false
+      deselectPalette()
       return
     }
     pendingDeselect.current = false
@@ -411,22 +557,34 @@ export function SheetPreview({
     if (dragRef.current || pendingDrag.current) {
       if (hoverId) setHoverId(null)
       if (hoverAdd) setHoverAdd(false)
+      if (hoverTitle) setHoverTitle(false)
       return
     }
     const pt = sheetPoint(e)
     if (!pt) {
       if (hoverId) setHoverId(null)
       if (hoverAdd) setHoverAdd(false)
+      if (hoverTitle) setHoverTitle(false)
       return
     }
-    const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout)
+    const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout, title)
     const next = cell?.paletteId ?? null
     if (next !== hoverId) setHoverId(next)
 
-    const slot = computeAddPaletteSlot(displayPalettes, layout).cell
     const pad = 6
+    const titleBox = titleHit ?? computeSheetHits(displayPalettes, layout, title).title
+    const overTitle =
+      !next &&
+      pt.x >= titleBox.x - pad &&
+      pt.x <= titleBox.x + titleBox.w + pad &&
+      pt.y >= titleBox.y - pad &&
+      pt.y <= titleBox.y + titleBox.h + pad
+    if (overTitle !== hoverTitle) setHoverTitle(overTitle)
+
+    const slot = computeAddPaletteSlot(displayPalettes, layout, title).cell
     const overAdd =
       !next &&
+      !overTitle &&
       pt.x >= slot.x - pad &&
       pt.x <= slot.x + slot.w + pad &&
       pt.y >= slot.y - pad &&
@@ -438,9 +596,19 @@ export function SheetPreview({
     pendingDrag.current = null
     const pt = sheetPoint(e)
     if (!pt) return
-    const hit = hitTest(pt.x, pt.y, displayPalettes, layout)
+    const hit = hitTest(pt.x, pt.y, displayPalettes, layout, title)
     if (!hit) return
     e.preventDefault()
+
+    if (hit.kind === 'sheet-title') {
+      if (edit?.kind === 'color') commitEdit()
+      setEdit({
+        kind: 'sheet-title',
+        value: title,
+        box: hit.rect,
+      })
+      return
+    }
 
     if (hit.kind === 'name') {
       if (edit?.kind === 'color') commitEdit()
@@ -499,6 +667,7 @@ export function SheetPreview({
     setSimplifyLive(false)
     setHoverId(null)
   }
+  deselectPaletteRef.current = deselectPalette
 
   function sortPalette(id: string, key: ColorSortKey) {
     setSimplifyLive(false)
@@ -537,11 +706,11 @@ export function SheetPreview({
   }
 
   const editStyle =
-    edit && edit.kind === 'name' && displayScale > 0
+    edit && (edit.kind === 'name' || edit.kind === 'sheet-title') && displayScale > 0
       ? {
           left: (edit.box.x + edit.box.w / 2) * displayScale,
           top: edit.box.y * displayScale,
-          minWidth: Math.max(edit.box.w * displayScale, 72),
+          minWidth: Math.max(edit.box.w * displayScale, edit.kind === 'sheet-title' ? 120 : 72),
           transform: 'translate(-50%, -2px)',
         }
       : undefined
@@ -594,19 +763,54 @@ export function SheetPreview({
       : undefined
 
   const addSlot = useMemo(
-    () => computeAddPaletteSlot(displayPalettes, layout),
-    [displayPalettes, layout],
+    () => computeAddPaletteSlot(displayPalettes, layout, title),
+    [displayPalettes, layout, title],
   )
-  const addBtn = 22
-  const addStyle =
-    !drag && hoverAdd && displayScale > 0
+  const addBtn = 26
+  const addGap = 8
+  const addClusterW = addBtn * 3 + addGap * 2
+  const showAddChrome = !drag && hoverAdd && displayScale > 0
+  const addActionsStyle = showAddChrome
+    ? {
+        left: (addSlot.cell.x + addSlot.cell.w / 2) * displayScale - addClusterW / 2,
+        top: (addSlot.cell.y + addSlot.cell.h / 2) * displayScale - addBtn / 2,
+        width: addClusterW,
+        height: addBtn,
+      }
+    : undefined
+  const addDropStyle =
+    displayScale > 0
       ? {
-          left: (addSlot.cell.x + addSlot.cell.w / 2) * displayScale - addBtn / 2,
-          top: (addSlot.cell.y + addSlot.cell.h / 2) * displayScale - addBtn / 2,
-          width: addBtn,
-          height: addBtn,
+          left: (addSlot.cell.x - ringPad) * displayScale,
+          top: (addSlot.cell.y - ringPad) * displayScale,
+          width: (addSlot.cell.w + ringPad * 2) * displayScale,
+          height: (addSlot.cell.h + ringPad * 2) * displayScale,
         }
       : undefined
+
+  function onFrameDragOver(e: React.DragEvent) {
+    if (![...e.dataTransfer.types].includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!hoverAdd) setHoverAdd(true)
+  }
+
+  function onFrameDragLeave(e: React.DragEvent) {
+    if (frameRef.current?.contains(e.relatedTarget as Node)) return
+    setHoverAdd(false)
+  }
+
+  function onFrameDrop(e: React.DragEvent) {
+    if (![...e.dataTransfer.types].includes('Files')) return
+    e.preventDefault()
+    setHoverAdd(false)
+    onSheetActiveChangeRef.current?.(true)
+    const image = imageFilesFromDataTransfer(e.dataTransfer)[0]
+    if (!image) return
+    const path = sourcePathFromDrop(image, e.dataTransfer)
+    if (!path) onDropMissingPath?.()
+    onImportPng(image, path)
+  }
 
   const colorPanel =
     colorEdit && colorPal ? (
@@ -719,10 +923,16 @@ export function SheetPreview({
       <div
         className="preview__frame"
         ref={frameRef}
+        tabIndex={0}
+        onPointerDown={() => onSheetActiveChangeRef.current?.(true)}
         onPointerLeave={() => {
           setHoverId(null)
           setHoverAdd(false)
+          setHoverTitle(false)
         }}
+        onDragOver={onFrameDragOver}
+        onDragLeave={onFrameDragLeave}
+        onDrop={onFrameDrop}
       >
         <canvas
           ref={canvasRef}
@@ -753,40 +963,103 @@ export function SheetPreview({
           </button>
         )}
 
-        {addStyle && (
-          <button
-            type="button"
-            className="preview__add"
-            style={addStyle}
-            aria-label="Add palette"
-            title="Add palette"
-            onPointerDown={(e) => {
-              e.stopPropagation()
-              e.preventDefault()
-            }}
-            onClick={(e) => {
-              e.stopPropagation()
-              onAddPalette()
-              setHoverAdd(false)
-            }}
-            onPointerEnter={() => setHoverAdd(true)}
-          >
-            +
-          </button>
+        {addDropStyle && hoverAdd && !drag && (
+          <div
+            className="preview__import-drop"
+            style={addDropStyle}
+            aria-hidden
+          />
         )}
 
-        {edit?.kind === 'name' && editStyle && (
+        {addActionsStyle && (
+          <div
+            className="preview__add-actions"
+            style={addActionsStyle}
+            onPointerEnter={() => setHoverAdd(true)}
+          >
+            <button
+              type="button"
+              className="preview__add"
+              aria-label="Add blank palette"
+              title="Add blank palette"
+              onPointerDown={(e) => {
+                e.stopPropagation()
+                e.preventDefault()
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onAddPalette()
+                setHoverAdd(false)
+              }}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              className="preview__add"
+              aria-label="From image"
+              title="From image"
+              onPointerDown={(e) => {
+                e.stopPropagation()
+                e.preventDefault()
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onFromImage()
+                setHoverAdd(false)
+              }}
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M2.5 2.5h11A1.5 1.5 0 0 1 15 4v8a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12V4a1.5 1.5 0 0 1 1.5-1.5Zm0 1a.5.5 0 0 0-.5.5v8a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5V4a.5.5 0 0 0-.5-.5h-11Zm8.1 2.1a1.15 1.15 0 1 1 0 2.3 1.15 1.15 0 0 1 0-2.3ZM3.2 11.2l2.7-3.1a.6.6 0 0 1 .9 0l1.55 1.8 1.35-1.55a.6.6 0 0 1 .9.05l2.2 2.8H3.2Z"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="preview__add"
+              aria-label="Import sheet"
+              title="Import sheet"
+              onPointerDown={(e) => {
+                e.stopPropagation()
+                e.preventDefault()
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onImportSheet()
+                setHoverAdd(false)
+              }}
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M3.5 1.5h7.2L13.5 4.3V12a1.5 1.5 0 0 1-1.5 1.5H3.5A1.5 1.5 0 0 1 2 12V3A1.5 1.5 0 0 1 3.5 1.5Zm0 1A.5.5 0 0 0 3 3v9a.5.5 0 0 0 .5.5H12a.5.5 0 0 0 .5-.5V4.7L10.3 2.5H3.5ZM5 6.25h6v1H5v-1Zm0 2.25h6v1H5v-1Zm0 2.25h4v1H5v-1Z"
+                />
+                <path
+                  fill="currentColor"
+                  d="M4.75 13.75h8.75A1.5 1.5 0 0 0 15 12.25V5.5h-1v6.75a.5.5 0 0 1-.5.5H4.75v1Z"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
+
+        {(edit?.kind === 'name' || edit?.kind === 'sheet-title') && editStyle && (
           <div
             ref={editorRef}
-            className="preview__editor preview__editor--name"
+            className={`preview__editor preview__editor--name ${
+              edit.kind === 'sheet-title' ? 'preview__editor--sheet-title' : ''
+            }`}
             style={editStyle}
           >
             <input
               ref={inputRef}
               className="preview__name-input"
               value={edit.value}
+              placeholder={edit.kind === 'sheet-title' ? '<title>' : undefined}
               onChange={(e) => setEdit({ ...edit, value: e.target.value })}
-              aria-label="Palette name"
+              aria-label={edit.kind === 'sheet-title' ? 'Sheet title' : 'Palette name'}
             />
           </div>
         )}

@@ -9,8 +9,10 @@ import {
 } from '../types'
 
 interface JsonPanelProps {
+  title: string
   layout: SheetLayout
   palettes: Palette[]
+  onTitleChange: (title: string) => void
   onLayoutChange: (layout: SheetLayout) => void
   onPalettesChange: (palettes: Palette[]) => void
 }
@@ -30,12 +32,18 @@ const LAYOUT_NUM: {
   { key: 'bandWidth', label: 'bandWidth', min: 40, max: 480 },
   { key: 'bandHeight', label: 'bandHeight', min: 8, max: 80 },
   { key: 'nameGap', label: 'nameGap', min: 0, max: 48 },
+  { key: 'titleSize', label: 'titleSize', min: 14, max: 64 },
+  { key: 'titleGap', label: 'titleGap', min: 0, max: 80 },
+  { key: 'titleHAdjust', label: 'titleHAdjust', min: -200, max: 200 },
+  { key: 'titleVAdjust', label: 'titleVAdjust', min: -80, max: 120 },
   { key: 'padding', label: 'padding', min: 0, max: 120 },
 ]
 
 export function JsonPanel({
+  title,
   layout,
   palettes,
+  onTitleChange,
   onLayoutChange,
   onPalettesChange,
 }: JsonPanelProps) {
@@ -67,7 +75,7 @@ export function JsonPanel({
 
   async function copyJson() {
     try {
-      const doc = await serializeSheetDocument(palettes, layout)
+      const doc = await serializeSheetDocument(palettes, layout, title)
       await navigator.clipboard.writeText(JSON.stringify(doc, null, 2))
       setCopyState('copied')
       window.setTimeout(() => setCopyState('idle'), 1600)
@@ -88,6 +96,7 @@ export function JsonPanel({
         <div className="json-block__body">
           <JsonLockedRow keyName="app" value='"paletter"' />
           <JsonLockedRow keyName="version" value="1" />
+          <JsonTextRow keyName="title" value={title} onChange={onTitleChange} />
 
           <details className="json-fold" open>
             <summary className="json-fold__sum">
@@ -228,7 +237,7 @@ function PaletteJsonBlock({
   }
 
   function clearSource() {
-    const { sourceImage: _img, sourcePicks: _picks, ...rest } = palette
+    const { sourceImage: _img, sourcePicks: _picks, sourcePath: _path, ...rest } = palette
     onChange(rest)
   }
 
@@ -295,12 +304,17 @@ function PaletteJsonBlock({
           <span className="json-punct">,</span>
         </div>
 
-        {palette.sourceImage ? (
+        {palette.sourceImage || palette.sourcePath ? (
           <>
-            <JsonLockedRow
-              keyName="sourceImage"
-              value={`${palette.sourceImage.width}×${palette.sourceImage.height} png`}
-            />
+            {palette.sourcePath ? (
+              <JsonLockedRow keyName="sourcePath" value={`"${palette.sourcePath}"`} />
+            ) : null}
+            {palette.sourceImage ? (
+              <JsonLockedRow
+                keyName="sourceImage"
+                value={`${palette.sourceImage.width}×${palette.sourceImage.height} png`}
+              />
+            ) : null}
             <JsonLockedRow
               keyName="sourcePicks"
               value={String(palette.sourcePicks?.length ?? 0)}

@@ -1,38 +1,68 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { parseHex } from '../lib/palette'
 import type { NamePosition, Palette, SheetLayout } from '../types'
 import { JsonPanel } from './JsonPanel'
 
 interface ToolbarProps {
+  title: string
   layout: SheetLayout
   palettes: Palette[]
   selectedId: string | null
   onSelectPalette: (id: string | null) => void
+  onTitleChange: (title: string) => void
   onLayoutChange: (layout: SheetLayout) => void
   onPalettesChange: (palettes: Palette[]) => void
   onAddPalette: () => void
   onFromImage: () => void
   onImportSheet: () => void
-  onExport: () => void
+  onSave: () => void
+  saveBusy?: boolean
   onEditSlot: (el: HTMLDivElement | null) => void
+  /** Ask Layout tab to open with the sheet-title fold expanded. */
+  layoutFocus?: 'sheet-title' | null
+  onLayoutFocusHandled?: () => void
 }
 
 type SideTab = 'add' | 'edit' | 'layout' | 'json'
 
+function FloppyIcon() {
+  return (
+    <svg
+      className="side-panel__save-icon"
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      aria-hidden
+    >
+      <path
+        fill="currentColor"
+        d="M4 2h12l4 4v16H4V2zm2 2v5h9V4H6zm0 14h12v-7H6v7zm2-5h2v3H8v-3zm4 0h4v2h-4v-2z"
+      />
+    </svg>
+  )
+}
+
 export function Toolbar({
+  title,
   layout,
   palettes,
   selectedId,
   onSelectPalette,
+  onTitleChange,
   onLayoutChange,
   onPalettesChange,
   onAddPalette,
   onFromImage,
   onImportSheet,
-  onExport,
+  onSave,
+  saveBusy = false,
   onEditSlot,
+  layoutFocus = null,
+  onLayoutFocusHandled,
 }: ToolbarProps) {
   const [tab, setTab] = useState<SideTab>('add')
+  const [sheetTitleOpen, setSheetTitleOpen] = useState(true)
+  const titleInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (selectedId) setTab('edit')
@@ -41,6 +71,18 @@ export function Toolbar({
   useEffect(() => {
     if (tab !== 'edit' || !selectedId) onEditSlot(null)
   }, [tab, selectedId, onEditSlot])
+
+  useEffect(() => {
+    if (layoutFocus !== 'sheet-title') return
+    setTab('layout')
+    setSheetTitleOpen(true)
+    const id = window.requestAnimationFrame(() => {
+      titleInputRef.current?.focus()
+      titleInputRef.current?.select()
+      onLayoutFocusHandled?.()
+    })
+    return () => window.cancelAnimationFrame(id)
+  }, [layoutFocus, onLayoutFocusHandled])
 
   function patch(next: Partial<SheetLayout>) {
     onLayoutChange({ ...layout, ...next })
@@ -52,34 +94,41 @@ export function Toolbar({
         <div className="toolbar__brand">
           <p className="toolbar__mark">Paletter</p>
         </div>
-        <div className="toolbar__actions">
-          <button type="button" className="btn btn--primary btn--small" onClick={onExport}>
-            Export PNG
-          </button>
-        </div>
       </header>
 
       <aside className="side-panel" aria-label="Tools">
-        <div className="side-panel__tabs" role="tablist">
-          {(
-            [
-              ['add', 'Add'],
-              ['edit', 'Edit'],
-              ['layout', 'Layout'],
-              ['json', 'JSON'],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={tab === id}
-              className={`side-panel__tab ${tab === id ? 'side-panel__tab--on' : ''}`}
-              onClick={() => setTab(id)}
-            >
-              {label}
-            </button>
-          ))}
+        <div className="side-panel__tabs-row">
+          <div className="side-panel__tabs" role="tablist">
+            {(
+              [
+                ['add', 'Add'],
+                ['edit', 'Edit'],
+                ['layout', 'Layout'],
+                ['json', 'JSON'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                className={`side-panel__tab ${tab === id ? 'side-panel__tab--on' : ''}`}
+                onClick={() => setTab(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="side-panel__save"
+            onClick={onSave}
+            disabled={saveBusy}
+            aria-label="Save PNG"
+            title="Save PNG (Ctrl+S)"
+          >
+            <FloppyIcon />
+          </button>
         </div>
 
         <div
@@ -108,22 +157,35 @@ export function Toolbar({
                 <ul className="side-panel__palette-list">
                   {palettes.map((palette) => (
                     <li key={palette.id}>
-                      <button
-                        type="button"
-                        className="side-panel__palette"
-                        onClick={() => onSelectPalette(palette.id)}
-                      >
-                        <span className="side-panel__palette-swatch" aria-hidden>
-                          {palette.colors.map((hex, i) => (
-                            <span
-                              key={`${hex}-${i}`}
-                              className="side-panel__palette-chip"
-                              style={{ background: hex }}
-                            />
-                          ))}
-                        </span>
-                        <span className="side-panel__palette-name">{palette.name}</span>
-                      </button>
+                      <div className="side-panel__palette">
+                        <button
+                          type="button"
+                          className="side-panel__palette-main"
+                          onClick={() => onSelectPalette(palette.id)}
+                        >
+                          <span className="side-panel__palette-swatch" aria-hidden>
+                            {palette.colors.map((hex, i) => (
+                              <span
+                                key={`${hex}-${i}`}
+                                className="side-panel__palette-chip"
+                                style={{ background: hex }}
+                              />
+                            ))}
+                          </span>
+                          <span className="side-panel__palette-name">{palette.name}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="side-panel__palette-remove"
+                          aria-label={`Delete ${palette.name}`}
+                          title="Delete palette"
+                          onClick={() =>
+                            onPalettesChange(palettes.filter((p) => p.id !== palette.id))
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -139,8 +201,10 @@ export function Toolbar({
 
           {tab === 'json' && (
             <JsonPanel
+              title={title}
               layout={layout}
               palettes={palettes}
+              onTitleChange={onTitleChange}
               onLayoutChange={onLayoutChange}
               onPalettesChange={onPalettesChange}
             />
@@ -148,6 +212,58 @@ export function Toolbar({
 
           {tab === 'layout' && (
             <>
+              <details
+                className="side-panel__fold"
+                open={sheetTitleOpen}
+                onToggle={(e) => setSheetTitleOpen(e.currentTarget.open)}
+              >
+                <summary className="side-panel__fold-sum">
+                  <span>Sheet title</span>
+                  <span className="side-panel__fold-caret" aria-hidden />
+                </summary>
+                <div className="side-panel__fold-body">
+                  <label className="field">
+                    <span>Title</span>
+                    <input
+                      ref={titleInputRef}
+                      className="swatch__hex"
+                      value={title}
+                      placeholder="<title>"
+                      onChange={(e) => onTitleChange(e.target.value)}
+                      aria-label="Sheet title"
+                    />
+                  </label>
+                  <Slider
+                    label="Title size"
+                    min={14}
+                    max={64}
+                    value={layout.titleSize}
+                    onChange={(titleSize) => patch({ titleSize })}
+                  />
+                  <Slider
+                    label="Title gap"
+                    min={0}
+                    max={80}
+                    value={layout.titleGap}
+                    onChange={(titleGap) => patch({ titleGap })}
+                  />
+                  <Slider
+                    label="H adjust"
+                    min={-200}
+                    max={200}
+                    value={layout.titleHAdjust}
+                    onChange={(titleHAdjust) => patch({ titleHAdjust })}
+                  />
+                  <Slider
+                    label="V adjust"
+                    min={-80}
+                    max={120}
+                    value={layout.titleVAdjust}
+                    onChange={(titleVAdjust) => patch({ titleVAdjust })}
+                  />
+                </div>
+              </details>
+
               <label className="field">
                 <span>Columns</span>
                 <div className="side-panel__select">

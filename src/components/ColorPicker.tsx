@@ -19,8 +19,6 @@ export function ColorPicker({ value, onChange, className = '' }: ColorPickerProp
 
   return (
     <div className={`color-picker ${className}`.trim()}>
-      <div className="color-picker__swatch" style={{ background: valid }} />
-
       <div className="color-picker__wheel-pane">
         <div className="color-picker__wheel-wrap">
           <ColorWheel hex={valid} onChange={onChange} size={220} />

@@ -13,11 +13,14 @@ export interface SerializedPalette {
   sourcePicks?: PaletteSourcePick[]
   /** Lossless PNG of the from-image working bitmap, base64 (no data-URL prefix). */
   sourcePng?: string
+  /** Absolute local path or http(s) URL the source was loaded from. */
+  sourcePath?: string
 }
 
 export interface SheetDocument {
   version: typeof SHEET_META_VERSION
   app: 'paletter'
+  title: string
   layout: SheetLayout
   palettes: SerializedPalette[]
 }
@@ -210,6 +213,7 @@ export async function pngBase64ToImageData(b64: string): Promise<ImageData> {
 export async function serializeSheetDocument(
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): Promise<SheetDocument> {
   const out: SerializedPalette[] = []
   for (const p of palettes) {
@@ -219,6 +223,7 @@ export async function serializeSheetDocument(
       colors: [...p.colors],
     }
     if (p.sourcePicks?.length) entry.sourcePicks = structuredClone(p.sourcePicks)
+    if (p.sourcePath) entry.sourcePath = p.sourcePath
     if (p.sourceImage) {
       try {
         entry.sourcePng = await imageDataToPngBase64(p.sourceImage)
@@ -231,6 +236,7 @@ export async function serializeSheetDocument(
   return {
     version: SHEET_META_VERSION,
     app: 'paletter',
+    title,
     layout: { ...layout },
     palettes: out,
   }
@@ -239,6 +245,7 @@ export async function serializeSheetDocument(
 export async function deserializeSheetDocument(doc: SheetDocument): Promise<{
   palettes: Palette[]
   layout: SheetLayout
+  title: string
 }> {
   const layout: SheetLayout = { ...DEFAULT_LAYOUT, ...doc.layout }
   const palettes: Palette[] = []
@@ -249,6 +256,9 @@ export async function deserializeSheetDocument(doc: SheetDocument): Promise<{
       colors: Array.isArray(p.colors) ? p.colors.map(String) : [],
     }
     if (p.sourcePicks?.length) palette.sourcePicks = structuredClone(p.sourcePicks)
+    if (typeof p.sourcePath === 'string' && p.sourcePath.trim()) {
+      palette.sourcePath = p.sourcePath.trim()
+    }
     if (p.sourcePng) {
       try {
         palette.sourceImage = cloneImageData(await pngBase64ToImageData(p.sourcePng))
@@ -258,7 +268,7 @@ export async function deserializeSheetDocument(doc: SheetDocument): Promise<{
     }
     if (palette.colors.length) palettes.push(palette)
   }
-  return { palettes, layout }
+  return { palettes, layout, title: typeof doc.title === 'string' ? doc.title : '' }
 }
 
 export function parseSheetDocumentJson(raw: string): SheetDocument | null {
@@ -278,9 +288,10 @@ export async function pngBlobWithSheetMeta(
   pngBlob: Blob,
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): Promise<Blob> {
   const bytes = new Uint8Array(await pngBlob.arrayBuffer())
-  const doc = await serializeSheetDocument(palettes, layout)
+  const doc = await serializeSheetDocument(palettes, layout, title)
   // iTXt carries UTF-8 JSON (names, hex, optional base64 source PNGs).
   const json = JSON.stringify(doc)
   const next = embedPngText(bytes, SHEET_META_KEYWORD, json)
@@ -290,7 +301,7 @@ export async function pngBlobWithSheetMeta(
 /** Try to read an embedded Paletter document from a PNG file/blob. */
 export async function readSheetMetaFromPng(
   file: Blob,
-): Promise<{ palettes: Palette[]; layout: SheetLayout } | null> {
+): Promise<{ palettes: Palette[]; layout: SheetLayout; title: string } | null> {
   const bytes = new Uint8Array(await file.arrayBuffer())
   const raw = readPngText(bytes, SHEET_META_KEYWORD)
   if (!raw) return null

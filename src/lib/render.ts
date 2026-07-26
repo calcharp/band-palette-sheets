@@ -7,6 +7,37 @@ const NAME_LINE_HEIGHT = 22
 const NAME_BASELINE = 16
 const HEX_FONT = '500 11px "IBM Plex Mono", monospace'
 const NAME_COLOR = '#1c1917'
+/** Ghost label in the live preview only — never written into exported PNGs. */
+export const SHEET_TITLE_PLACEHOLDER = '<title>'
+
+export function titleFont(size: number): string {
+  return `600 ${Math.max(12, size)}px "DM Sans", sans-serif`
+}
+
+/** Vertical space reserved for the sheet title + gap below it. */
+export function sheetTitleBand(layout: SheetLayout): number {
+  const size = Math.max(12, layout.titleSize ?? 28)
+  const lineH = Math.round(size * 1.2)
+  return lineH + (layout.titleGap ?? 28)
+}
+
+function measureSheetTitle(
+  ctx: CanvasRenderingContext2D,
+  layout: SheetLayout,
+  title: string,
+  forPreview = false,
+): { w: number; h: number; baseline: number; size: number } {
+  const size = Math.max(12, layout.titleSize ?? 28)
+  const h = Math.round(size * 1.2)
+  ctx.font = titleFont(size)
+  const label = title.trim()
+    ? title
+    : forPreview
+      ? SHEET_TITLE_PLACEHOLDER
+      : ' '
+  const w = Math.ceil(ctx.measureText(label).width)
+  return { w: Math.max(w, 64), h, baseline: Math.round(size * 0.85), size }
+}
 
 /** Relative luminance 0–1 (sRGB). */
 function relativeLuminance(hex: string): number {
@@ -58,6 +89,8 @@ export interface SheetLayoutInfo {
   width: number
   height: number
   hits: PaletteHit[]
+  /** Hit/edit region for the sheet title (top center). */
+  title: Rect
 }
 
 function measureName(ctx: CanvasRenderingContext2D, name: string): { w: number; h: number } {
@@ -222,11 +255,28 @@ function buildGrid(palettes: Palette[], layout: SheetLayout) {
 export function computeSheetHits(
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): SheetLayoutInfo {
+  const measure = document.createElement('canvas').getContext('2d')
+  if (!measure) throw new Error('No canvas context')
+
   const { cols, list, metricsList, colWidths, rowHeights, gridW, gridH } = buildGrid(
     palettes,
     layout,
   )
+  const titleBand = sheetTitleBand(layout)
+  const titleM = measureSheetTitle(measure, layout, title, true)
+  const width = Math.ceil(gridW + layout.padding * 2)
+  const height = Math.ceil(gridH + layout.padding * 2 + titleBand)
+  const gridTop = layout.padding + titleBand
+
+  const titleW = Math.max(titleM.w, Math.min(gridW, 240))
+  const titleRect: Rect = {
+    x: (width - titleW) / 2 + (layout.titleHAdjust ?? 0),
+    y: layout.padding + (layout.titleVAdjust ?? 0),
+    w: titleW,
+    h: titleM.h,
+  }
 
   const hits: PaletteHit[] = list.map((palette, i) => {
     const c = i % cols
@@ -236,7 +286,7 @@ export function computeSheetHits(
       colWidths.slice(0, c).reduce((a, b) => a + b, 0) +
       layout.colGap * c
     const y =
-      layout.padding +
+      gridTop +
       rowHeights.slice(0, r).reduce((a, b) => a + b, 0) +
       layout.rowGap * r
     const m = metricsList[i]
@@ -278,9 +328,10 @@ export function computeSheetHits(
   })
 
   return {
-    width: Math.ceil(gridW + layout.padding * 2),
-    height: Math.ceil(gridH + layout.padding * 2),
+    width,
+    height,
     hits,
+    title: titleRect,
   }
 }
 
@@ -291,26 +342,32 @@ export function computeSheetHits(
 export function computeAddPaletteSlot(
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): { cell: Rect; width: number; height: number } {
   const measure = document.createElement('canvas').getContext('2d')
   if (!measure) throw new Error('No canvas context')
 
+  const titleBand = sheetTitleBand(layout)
   const phantomColors =
     palettes[palettes.length - 1]?.colors?.length
       ? palettes[palettes.length - 1]!.colors.map(() => '#e8e8e8')
       : ['#e8e8e8', '#d4d4d4']
   const phantom: Palette = { id: '__add__', name: 'Palette', colors: phantomColors }
   const phantomMetrics = cellMetrics(measure, phantom, layout)
+  const gridTop = layout.padding + titleBand
 
   if (!palettes.length) {
     const w = phantomMetrics.contentW
     const h = phantomMetrics.contentH
     return {
-      cell: { x: layout.padding, y: layout.padding, w, h },
+      cell: { x: layout.padding, y: gridTop, w, h },
       width: Math.ceil(w + layout.padding * 2),
-      height: Math.ceil(h + layout.padding * 2),
+      height: Math.ceil(h + layout.padding * 2 + titleBand),
     }
   }
+
+  // Keep title in signature for API consistency with other layout helpers.
+  void title
 
   const { cols, list, colWidths, rowHeights, gridW, gridH } = buildGrid(palettes, layout)
   const rows = Math.max(1, Math.ceil(list.length / cols))
@@ -341,7 +398,7 @@ export function computeAddPaletteSlot(
     widths.slice(0, c).reduce((a, b) => a + b, 0) +
     layout.colGap * c
   const y =
-    layout.padding +
+    gridTop +
     heights.slice(0, r).reduce((a, b) => a + b, 0) +
     layout.rowGap * r
 
@@ -353,11 +410,12 @@ export function computeAddPaletteSlot(
       h: heights[r] ?? phantomMetrics.contentH,
     },
     width: Math.ceil(nextGridW + layout.padding * 2),
-    height: Math.ceil(nextGridH + layout.padding * 2),
+    height: Math.ceil(nextGridH + layout.padding * 2 + titleBand),
   }
 }
 
 export type HitTarget =
+  | { kind: 'sheet-title'; rect: Rect }
   | { kind: 'name'; paletteId: string; rect: Rect }
   | { kind: 'band'; paletteId: string; colorIndex: number; rect: Rect; hex: string }
   | { kind: 'add-band'; paletteId: string; rect: Rect }
@@ -371,8 +429,12 @@ export function hitTest(
   y: number,
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): HitTarget | null {
-  const { hits } = computeSheetHits(palettes, layout)
+  const { hits, title: titleRect } = computeSheetHits(palettes, layout, title)
+  if (pointInRect(x, y, titleRect)) {
+    return { kind: 'sheet-title', rect: titleRect }
+  }
   for (const hit of hits) {
     if (pointInRect(x, y, hit.name)) {
       return { kind: 'name', paletteId: hit.paletteId, rect: hit.name }
@@ -408,8 +470,9 @@ export function cellAtPoint(
   y: number,
   palettes: Palette[],
   layout: SheetLayout,
+  title = '',
 ): PaletteHit | null {
-  const { hits } = computeSheetHits(palettes, layout)
+  const { hits } = computeSheetHits(palettes, layout, title)
   for (const hit of hits) {
     if (pointInRect(x, y, hit.cell)) return hit
   }
@@ -437,14 +500,23 @@ export function renderSheet(
   palettes: Palette[],
   layout: SheetLayout,
   scale = 1,
+  title = '',
+  opts?: { preview?: boolean },
 ): HTMLCanvasElement {
+  const measure = document.createElement('canvas').getContext('2d')
+  if (!measure) throw new Error('No canvas context')
+
+  const preview = Boolean(opts?.preview)
   const { cols, list, metricsList, colWidths, rowHeights, gridW, gridH } = buildGrid(
     palettes,
     layout,
   )
+  const titleBand = sheetTitleBand(layout)
+  const titleM = measureSheetTitle(measure, layout, title, preview)
 
   const width = Math.ceil((gridW + layout.padding * 2) * scale)
-  const height = Math.ceil((gridH + layout.padding * 2) * scale)
+  const height = Math.ceil((gridH + layout.padding * 2 + titleBand) * scale)
+  const gridTop = layout.padding + titleBand
 
   const canvas = document.createElement('canvas')
   canvas.width = Math.max(1, width)
@@ -453,8 +525,24 @@ export function renderSheet(
   if (!ctx) throw new Error('No canvas context')
 
   ctx.scale(scale, scale)
+  const logicalW = canvas.width / scale
+  const logicalH = canvas.height / scale
   ctx.fillStyle = layout.background
-  ctx.fillRect(0, 0, canvas.width / scale, canvas.height / scale)
+  ctx.fillRect(0, 0, logicalW, logicalH)
+
+  const trimmed = title.trim()
+  if (trimmed || preview) {
+    ctx.font = titleFont(titleM.size)
+    ctx.fillStyle = trimmed ? NAME_COLOR : 'rgba(28, 25, 23, 0.28)'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillText(
+      trimmed || SHEET_TITLE_PLACEHOLDER,
+      logicalW / 2 + (layout.titleHAdjust ?? 0),
+      layout.padding + titleM.baseline + (layout.titleVAdjust ?? 0),
+    )
+    ctx.textAlign = 'start'
+  }
 
   list.forEach((palette, i) => {
     const c = i % cols
@@ -464,7 +552,7 @@ export function renderSheet(
       colWidths.slice(0, c).reduce((a, b) => a + b, 0) +
       layout.colGap * c
     const y =
-      layout.padding +
+      gridTop +
       rowHeights.slice(0, r).reduce((a, b) => a + b, 0) +
       layout.rowGap * r
     const m = metricsList[i]
