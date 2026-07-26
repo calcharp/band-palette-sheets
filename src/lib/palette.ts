@@ -147,13 +147,31 @@ export function downloadCanvasJpg(canvas: HTMLCanvasElement, fileName: string, q
 export function downloadCanvasPng(canvas: HTMLCanvasElement, fileName: string) {
   canvas.toBlob((blob) => {
     if (!blob) return
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = fileName.endsWith('.png') ? fileName : `${fileName}.png`
-    a.click()
-    URL.revokeObjectURL(url)
+    triggerDownload(blob, fileName.endsWith('.png') ? fileName : `${fileName}.png`)
   }, 'image/png')
+}
+
+/** PNG download with an optional post-process step (e.g. embed metadata). */
+export async function downloadCanvasPngAsync(
+  canvas: HTMLCanvasElement,
+  fileName: string,
+  transform?: (blob: Blob) => Promise<Blob>,
+) {
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((b) => resolve(b), 'image/png'),
+  )
+  if (!blob) return
+  const out = transform ? await transform(blob) : blob
+  triggerDownload(out, fileName.endsWith('.png') ? fileName : `${fileName}.png`)
+}
+
+function triggerDownload(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 export type { SheetLayout, Palette }

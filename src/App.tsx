@@ -4,7 +4,8 @@ import { ImportSheetModal } from './components/ImportSheetModal'
 import { SheetPreview } from './components/SheetPreview'
 import { Toolbar } from './components/Toolbar'
 import { useHistory } from './lib/history'
-import { createPalette, downloadCanvasPng } from './lib/palette'
+import { createPalette, downloadCanvasPngAsync, uid } from './lib/palette'
+import { pngBlobWithSheetMeta } from './lib/pngMeta'
 import { renderSheet } from './lib/render'
 import { DEFAULT_LAYOUT, type Palette, type SheetLayout } from './types'
 
@@ -43,9 +44,11 @@ export default function App() {
     set((d) => ({ ...d, layout: { ...d.layout, background: '#ffffff' } }))
   }, [layout.background, set])
 
-  function handleExport() {
+  async function handleExport() {
     const canvas = renderSheet(palettes, layout, 2)
-    downloadCanvasPng(canvas, 'palette-sheet')
+    await downloadCanvasPngAsync(canvas, 'palette-sheet', (blob) =>
+      pngBlobWithSheetMeta(blob, palettes, layout),
+    )
   }
 
   function openFromImage() {
@@ -78,6 +81,19 @@ export default function App() {
     })
   }
 
+  function importSheet(payload: { palettes: Palette[]; layout?: SheetLayout }) {
+    set((d) => ({
+      layout: payload.layout ?? d.layout,
+      palettes: [
+        ...d.palettes,
+        ...payload.palettes.map((p) => ({
+          ...p,
+          id: uid('pal'),
+        })),
+      ],
+    }))
+  }
+
   return (
     <div className="app">
       <Toolbar
@@ -86,6 +102,7 @@ export default function App() {
         selectedId={selectedId}
         onSelectPalette={setSelectedId}
         onLayoutChange={(next) => set((d) => ({ ...d, layout: next }))}
+        onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
         onAddPalette={() =>
           set((d) => ({
             ...d,
@@ -94,7 +111,7 @@ export default function App() {
         }
         onFromImage={openFromImage}
         onImportSheet={() => setImportSheetOpen(true)}
-        onExport={handleExport}
+        onExport={() => void handleExport()}
         onEditSlot={onEditSlot}
       />
       <main className="workspace">
@@ -123,7 +140,7 @@ export default function App() {
       <ImportSheetModal
         open={importSheetOpen}
         onClose={() => setImportSheetOpen(false)}
-        onAdd={(next) => set((d) => ({ ...d, palettes: [...d.palettes, ...next] }))}
+        onImport={importSheet}
       />
     </div>
   )

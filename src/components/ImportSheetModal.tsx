@@ -1,23 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
-import { loadPngBlob, loadPngFile } from '../lib/imagePalette'
+import { assertPng, loadPngBlob } from '../lib/imagePalette'
 import {
   detectedToPalettes,
   parsePaletteSheet,
   type DetectedPalette,
 } from '../lib/parsePaletteSheet'
+import { readSheetMetaFromPng } from '../lib/pngMeta'
 import { contrastInk } from '../lib/render'
-import type { Palette } from '../types'
+import type { Palette, SheetLayout } from '../types'
 
 interface ImportSheetModalProps {
   open: boolean
   onClose: () => void
-  onAdd: (palettes: Palette[]) => void
+  onImport: (payload: { palettes: Palette[]; layout?: SheetLayout }) => void
 }
 
-export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps) {
+export function ImportSheetModal({ open, onClose, onImport }: ImportSheetModalProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [source, setSource] = useState<ImageData | null>(null)
   const [detected, setDetected] = useState<DetectedPalette[]>([])
+  const [metaPalettes, setMetaPalettes] = useState<Palette[] | null>(null)
+  const [metaLayout, setMetaLayout] = useState<SheetLayout | null>(null)
+  const [fromMeta, setFromMeta] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
@@ -48,7 +52,7 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
   }, [open, onClose])
 
   useEffect(() => {
-    if (!open || !source) return
+    if (!open || !source || fromMeta) return
     let cancelled = false
     setBusy(true)
     setStatus('Detecting swatches…')
@@ -79,57 +83,104 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
     return () => {
       cancelled = true
     }
-  }, [open, source])
+  }, [open, source, fromMeta])
+
+  function resetPreview() {
+    setSource(null)
+    setDetected([])
+    setMetaPalettes(null)
+    setMetaLayout(null)
+    setFromMeta(false)
+    setBusy(false)
+    setStatus(null)
+  }
 
   async function ingestBlob(blob: Blob) {
     setError(null)
-    setDetected([])
-    setSource(null)
+    resetPreview()
+    setBusy(true)
+    setStatus('Reading PNG…')
     try {
+      await assertPng(blob)
+      const embedded = await readSheetMetaFromPng(blob)
+      if (embedded?.palettes.length) {
+        setMetaPalettes(embedded.palettes)
+        setMetaLayout(embedded.layout)
+        setFromMeta(true)
+        setSource(null)
+        setStatus(null)
+        setBusy(false)
+        return
+      }
       const data = await loadPngBlob(blob)
+      setFromMeta(false)
       setSource(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not read that PNG.')
+      setBusy(false)
+      setStatus(null)
     }
   }
 
   async function onFile(file: File | undefined) {
     if (!file) return
-    setError(null)
-    setDetected([])
-    setSource(null)
-    try {
-      const data = await loadPngFile(file)
-      setSource(data)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not read that PNG.')
-    }
+    await ingestBlob(file)
   }
 
   function rename(index: number, name: string) {
+    if (fromMeta && metaPalettes) {
+      setMetaPalettes((prev) =>
+        prev ? prev.map((p, i) => (i === index ? { ...p, name } : p)) : prev,
+      )
+      return
+    }
     setDetected((prev) => prev.map((p, i) => (i === index ? { ...p, name } : p)))
   }
 
   function removeAt(index: number) {
+    if (fromMeta && metaPalettes) {
+      setMetaPalettes((prev) => (prev ? prev.filter((_, i) => i !== index) : prev))
+      return
+    }
     setDetected((prev) => prev.filter((_, i) => i !== index))
   }
 
   function handleAdd() {
+    if (fromMeta && metaPalettes?.length) {
+      onImport({
+        palettes: metaPalettes,
+        layout: metaLayout ?? undefined,
+      })
+      handleClose()
+      return
+    }
     if (!detected.length) return
-    onAdd(detectedToPalettes(detected))
+    onImport({ palettes: detectedToPalettes(detected) })
     handleClose()
   }
 
   function handleClose() {
     onClose()
-    setSource(null)
-    setDetected([])
+    resetPreview()
     setError(null)
-    setStatus(null)
-    setBusy(false)
   }
 
   if (!open) return null
+
+  const previewPalettes: { name: string; colors: string[]; key: string }[] = fromMeta
+    ? (metaPalettes ?? []).map((p, i) => ({
+        name: p.name,
+        colors: p.colors,
+        key: p.id || `meta-${i}`,
+      }))
+    : detected.map((p, i) => ({
+        name: p.name,
+        colors: p.colors,
+        key: `${p.bounds.x}-${p.bounds.y}-${i}`,
+      }))
+
+  const count = previewPalettes.length
+  const canAdd = count > 0 && !busy
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={handleClose}>
@@ -143,9 +194,11 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
         <header className="modal__head">
           <div>
             <h2 id="import-sheet-title">Import palette sheet</h2>
-                <p className="modal__sub">
-                  PNG only — solid bands keep exact hexes. OCR reads names above each stack.
-                </p>
+            <p className="modal__sub">
+              {fromMeta
+                ? 'Embedded Paletter data found — palettes, layout, and reference images will import exactly.'
+                : 'PNG from this app embeds exact data. Other PNGs are scanned for solid bands (OCR for names).'}
+            </p>
           </div>
           <button type="button" className="icon-btn" onClick={handleClose} aria-label="Close">
             ×
@@ -169,18 +222,19 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
           </button>
           <span className="modal__hint">PNG only · or Ctrl+V to paste</span>
           {busy && status && <span className="modal__hint">{status}</span>}
+          {fromMeta && !busy && (
+            <span className="modal__hint">Using embedded sheet data</span>
+          )}
           {error && <span className="modal__error">{error}</span>}
         </div>
 
         <div className="sheet-import__list">
-          {!source && !busy && (
+          {!source && !fromMeta && !busy && (
             <p className="modal__empty">Upload or paste a palette sheet PNG</p>
           )}
-          {busy && !detected.length && (
-            <p className="modal__empty">{status ?? 'Working…'}</p>
-          )}
-          {detected.map((pal, i) => (
-            <article key={`${pal.bounds.x}-${pal.bounds.y}-${i}`} className="sheet-import__card">
+          {busy && !count && <p className="modal__empty">{status ?? 'Working…'}</p>}
+          {previewPalettes.map((pal, i) => (
+            <article key={pal.key} className="sheet-import__card">
               <div className="sheet-import__card-head">
                 <input
                   className="modal__name"
@@ -197,9 +251,9 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
                 </button>
               </div>
               <div className="sheet-import__bands">
-                {pal.colors.map((hex) => (
+                {pal.colors.map((hex, ci) => (
                   <div
-                    key={hex}
+                    key={`${hex}-${ci}`}
                     className="modal__band"
                     style={{ background: hex, color: contrastInk(hex) }}
                   >
@@ -218,10 +272,10 @@ export function ImportSheetModal({ open, onClose, onAdd }: ImportSheetModalProps
           <button
             type="button"
             className="btn btn--primary btn--small"
-            disabled={!detected.length || busy}
+            disabled={!canAdd}
             onClick={handleAdd}
           >
-            Add {detected.length || ''} palette{detected.length === 1 ? '' : 's'}
+            Add {count || ''} palette{count === 1 ? '' : 's'}
           </button>
         </footer>
       </div>

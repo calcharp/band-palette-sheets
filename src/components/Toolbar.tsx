@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { parseHex } from '../lib/palette'
 import type { NamePosition, Palette, SheetLayout } from '../types'
+import { JsonPanel } from './JsonPanel'
 
 interface ToolbarProps {
   layout: SheetLayout
@@ -8,6 +9,7 @@ interface ToolbarProps {
   selectedId: string | null
   onSelectPalette: (id: string | null) => void
   onLayoutChange: (layout: SheetLayout) => void
+  onPalettesChange: (palettes: Palette[]) => void
   onAddPalette: () => void
   onFromImage: () => void
   onImportSheet: () => void
@@ -15,7 +17,7 @@ interface ToolbarProps {
   onEditSlot: (el: HTMLDivElement | null) => void
 }
 
-type SideTab = 'add' | 'edit' | 'layout'
+type SideTab = 'add' | 'edit' | 'layout' | 'json'
 
 export function Toolbar({
   layout,
@@ -23,6 +25,7 @@ export function Toolbar({
   selectedId,
   onSelectPalette,
   onLayoutChange,
+  onPalettesChange,
   onAddPalette,
   onFromImage,
   onImportSheet,
@@ -63,6 +66,7 @@ export function Toolbar({
               ['add', 'Add'],
               ['edit', 'Edit'],
               ['layout', 'Layout'],
+              ['json', 'JSON'],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -132,6 +136,15 @@ export function Toolbar({
           {tab === 'edit' && selectedId ? (
             <div className="side-panel__edit-slot" ref={onEditSlot} />
           ) : null}
+
+          {tab === 'json' && (
+            <JsonPanel
+              layout={layout}
+              palettes={palettes}
+              onLayoutChange={onLayoutChange}
+              onPalettesChange={onPalettesChange}
+            />
+          )}
 
           {tab === 'layout' && (
             <>
