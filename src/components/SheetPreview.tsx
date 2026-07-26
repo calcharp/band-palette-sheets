@@ -97,6 +97,7 @@ export function SheetPreview({
   const inputRef = useRef<HTMLInputElement>(null)
   const editRef = useRef<ActiveEdit | null>(null)
   const dragRef = useRef<DragState | null>(null)
+  const ignoreTextEditOutsideRef = useRef(false)
   const onSheetActiveChangeRef = useRef(onSheetActiveChange)
   onSheetActiveChangeRef.current = onSheetActiveChange
   const pendingDrag = useRef<{
@@ -131,6 +132,18 @@ export function SheetPreview({
 
   editRef.current = edit
   dragRef.current = drag
+
+  function beginTextEdit(next: NameEdit | SheetTitleEdit) {
+    ignoreTextEditOutsideRef.current = true
+    setEdit(next)
+    const arm = () => {
+      ignoreTextEditOutsideRef.current = false
+      window.removeEventListener('pointerup', arm, true)
+      window.removeEventListener('pointercancel', arm, true)
+    }
+    window.addEventListener('pointerup', arm, true)
+    window.addEventListener('pointercancel', arm, true)
+  }
 
   // When selection comes from the Edit sidebar, mirror sheet-select setup.
   const lastSelectSetup = useRef<string | null>(null)
@@ -182,7 +195,19 @@ export function SheetPreview({
     }
 
     return next
-  }, [palettes, edit, selectedId, simplifyLive, simplifyK, simplifyReduce])
+    // Only color-edit fields should invalidate preview; title/name typing must not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    palettes,
+    edit?.kind,
+    edit && edit.kind === 'color' ? edit.paletteId : null,
+    edit && edit.kind === 'color' ? edit.colorIndex : null,
+    edit && edit.kind === 'color' ? edit.value : null,
+    selectedId,
+    simplifyLive,
+    simplifyK,
+    simplifyReduce,
+  ])
 
   const displayPalettesRef = useRef(displayPalettes)
   const layoutRef = useRef(layout)
@@ -206,6 +231,10 @@ export function SheetPreview({
 
     function onPointerDown(e: PointerEvent) {
       if (e.button !== 0) return
+      // Text edits have their own outside-dismiss listener — don't fight it.
+      const editing = editRef.current
+      if (editing?.kind === 'sheet-title' || editing?.kind === 'name') return
+
       const sel = selectedIdRef.current
       if (!sel) return
 
@@ -233,7 +262,7 @@ export function SheetPreview({
           )
           // Click on any palette cell: keep current selection until click/drag resolves.
           if (cell) return
-          // Sheet title hit — don't clear an in-progress title edit.
+          // Sheet title hit — opening title edit; leave selection alone.
           const titleBox = computeSheetHits(
             displayPalettesRef.current,
             layoutRef.current,
@@ -391,19 +420,24 @@ export function SheetPreview({
 
   useEffect(() => {
     if (!edit || (edit.kind !== 'name' && edit.kind !== 'sheet-title')) return
+
     function onPointerDown(e: PointerEvent) {
+      if (ignoreTextEditOutsideRef.current) return
       const node = editorRef.current
       if (node && !node.contains(e.target as Node)) commitEdit()
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault()
+        ignoreTextEditOutsideRef.current = false
         setEdit(null)
       } else if (e.key === 'Enter') {
+        if (document.querySelector('.modal-backdrop')) return
         e.preventDefault()
         commitEdit()
       }
     }
+
     document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKey)
     return () => {
@@ -510,6 +544,7 @@ export function SheetPreview({
   function commitEdit() {
     const next = editRef.current
     if (!next) return
+    ignoreTextEditOutsideRef.current = false
     if (next.kind === 'sheet-title') {
       onTitleChange(next.value)
     } else if (next.kind === 'name') {
@@ -547,7 +582,7 @@ export function SheetPreview({
       pendingDrag.current = null
       pendingDeselect.current = false
       if (editRef.current?.kind === 'color') commitEdit()
-      setEdit({
+      beginTextEdit({
         kind: 'sheet-title',
         value: title,
         box: titleBox,
@@ -622,7 +657,7 @@ export function SheetPreview({
 
     if (hit.kind === 'sheet-title') {
       if (edit?.kind === 'color') commitEdit()
-      setEdit({
+      beginTextEdit({
         kind: 'sheet-title',
         value: title,
         box: hit.rect,
@@ -633,7 +668,7 @@ export function SheetPreview({
     if (hit.kind === 'name') {
       if (edit?.kind === 'color') commitEdit()
       const pal = displayPalettes.find((p) => p.id === hit.paletteId)
-      setEdit({
+      beginTextEdit({
         kind: 'name',
         paletteId: hit.paletteId,
         value: pal?.name ?? '',
@@ -682,14 +717,9 @@ export function SheetPreview({
 
   function deselectPalette() {
     const current = editRef.current
-    if (
-      current?.kind === 'color' ||
-      current?.kind === 'sheet-title' ||
-      current?.kind === 'name'
-    ) {
+    // Color edits close with selection; title/name stay open until Enter/outside.
+    if (current?.kind === 'color') {
       commitEdit()
-    } else {
-      setEdit(null)
     }
     onSelectedIdChange(null)
     setSimplifyLive(false)

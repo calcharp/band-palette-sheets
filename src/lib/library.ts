@@ -366,6 +366,65 @@ export async function loadFileHandle(
   }
 }
 
+/**
+ * Open a system file picker in this file’s folder so the PNG is visible
+ * (closest web equivalent of “Show in folder”).
+ */
+export async function revealFileInFolder(
+  handle: FileSystemFileHandle,
+): Promise<'ok' | 'denied' | 'unsupported' | 'failed'> {
+  type OpenPicker = (options?: {
+    multiple?: boolean
+    id?: string
+    startIn?: FileSystemHandle | string
+    types?: { description: string; accept: Record<string, string[]> }[]
+  }) => Promise<FileSystemFileHandle[]>
+
+  const pickFile =
+    typeof window !== 'undefined' && 'showOpenFilePicker' in window
+      ? (window.showOpenFilePicker as OpenPicker).bind(window)
+      : null
+  if (!pickFile) return 'unsupported'
+
+  try {
+    const query = await handle.queryPermission({ mode: 'read' })
+    if (
+      query !== 'granted' &&
+      (await handle.requestPermission({ mode: 'read' })) !== 'granted'
+    ) {
+      return 'denied'
+    }
+  } catch {
+    return 'denied'
+  }
+
+  try {
+    await pickFile({
+      multiple: false,
+      startIn: handle,
+      types: [
+        {
+          description: 'PNG image',
+          accept: { 'image/png': ['.png'] },
+        },
+      ],
+    })
+    return 'ok'
+  } catch (e) {
+    // Cancel still means the user saw the containing folder in the system dialog.
+    if (e instanceof DOMException && e.name === 'AbortError') return 'ok'
+    return 'failed'
+  }
+}
+
+export async function revealLibraryEntry(
+  entryId: string,
+): Promise<'ok' | 'no-handle' | 'denied' | 'unsupported' | 'failed'> {
+  const handle = await loadFileHandle(entryId)
+  if (!handle) return 'no-handle'
+  return revealFileInFolder(handle)
+}
+
 async function pruneOrphanHandles(): Promise<void> {
   try {
     const keep = allRememberedEntryIds()

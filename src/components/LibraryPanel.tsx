@@ -48,6 +48,17 @@ interface LibraryPanelProps {
   /** Called after the current sheet is added as a library entry. */
   onLinkedEntry?: (entryId: string) => void
   addBusy?: boolean
+  openSheets: {
+    id: string
+    label: string
+    libraryEntryId: string | null
+    handle: FileSystemFileHandle | null
+  }[]
+  activeSheetId: string
+  onSelectSheet: (id: string) => void
+  onCloseSheet: (id: string) => void
+  onNewSheet: () => void
+  onRevealEntry: (entry: LibraryEntry) => void
 }
 
 type Draft =
@@ -73,6 +84,12 @@ export function LibraryPanel({
   onOpenFolder,
   onLinkedEntry,
   addBusy = false,
+  openSheets,
+  activeSheetId,
+  onSelectSheet,
+  onCloseSheet,
+  onNewSheet,
+  onRevealEntry,
 }: LibraryPanelProps) {
   const [meta, setMeta] = useState<LibraryMeta>(() => loadLibraryMeta())
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null)
@@ -252,6 +269,7 @@ export function LibraryPanel({
     onEnsureExpanded: ensureExpanded,
     onOpenEntry,
     onOpenFolder,
+    onRevealEntry,
     onAddOpenSheet: (folderId: string | null) => void addEntryFrom('current', folderId),
     onAddPng: (folderId: string | null) => void addEntryFrom('png', folderId),
     addBusy: busy || addBusy,
@@ -288,6 +306,56 @@ export function LibraryPanel({
           {...folderHandlers}
         />
       </div>
+
+      <div className="library-open">
+        <div className="library-open__head">
+          <span className="library-open__title">Open</span>
+          <button
+            type="button"
+            className="library-open__new"
+            onClick={onNewSheet}
+            title="New sheet"
+          >
+            + New
+          </button>
+        </div>
+        <ul className="library-open__list" aria-label="Open sheets">
+          {openSheets.map((sheet) => {
+            const activeSheet = sheet.id === activeSheetId
+            return (
+              <li key={sheet.id}>
+                <div
+                  className={`library-open__row ${
+                    activeSheet ? 'library-open__row--active' : ''
+                  }`}
+                >
+                  <button
+                    type="button"
+                    className="library-open__main"
+                    onClick={() => onSelectSheet(sheet.id)}
+                  >
+                    <SheetThumb
+                      entryId={sheet.libraryEntryId}
+                      fileHandle={sheet.handle}
+                      label={sheet.label}
+                    />
+                    <span className="library-open__label">{sheet.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="library-open__close"
+                    aria-label={`Close ${sheet.label}`}
+                    title="Close"
+                    onClick={() => onCloseSheet(sheet.id)}
+                  >
+                    ×
+                  </button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      </div>
     </div>
   )
 }
@@ -309,6 +377,7 @@ function FolderBranch({
   onEnsureExpanded,
   onOpenEntry,
   onOpenFolder,
+  onRevealEntry,
   onAddOpenSheet,
   onAddPng,
   addBusy: folderAddBusy,
@@ -338,6 +407,7 @@ function FolderBranch({
   onEnsureExpanded: (id: string | null) => void
   onOpenEntry: (entry: LibraryEntry) => void
   onOpenFolder: (folderId: string | null) => void
+  onRevealEntry: (entry: LibraryEntry) => void
   onAddOpenSheet: (folderId: string | null) => void
   onAddPng: (folderId: string | null) => void
   addBusy: boolean
@@ -536,6 +606,7 @@ function FolderBranch({
               onEnsureExpanded={onEnsureExpanded}
               onOpenEntry={onOpenEntry}
               onOpenFolder={onOpenFolder}
+              onRevealEntry={onRevealEntry}
               onAddOpenSheet={onAddOpenSheet}
               onAddPng={onAddPng}
               addBusy={folderAddBusy}
@@ -561,6 +632,7 @@ function FolderBranch({
               dragging={dragging}
               canDropOn={canDropOn}
               onOpen={() => onOpenEntry(entry)}
+              onReveal={() => onRevealEntry(entry)}
               onSetDraft={onSetDraft}
               onSetMenuId={onSetMenuId}
               onCommitDraft={onCommitDraft}
@@ -666,6 +738,7 @@ function EntryTreeRow({
   dragging,
   canDropOn,
   onOpen,
+  onReveal,
   onSetDraft,
   onSetMenuId,
   onCommitDraft,
@@ -683,6 +756,7 @@ function EntryTreeRow({
   dragging: DragPayload | null
   canDropOn: (target: DropTarget) => boolean
   onOpen: () => void
+  onReveal: () => void
   onSetDraft: (d: Draft | null) => void
   onSetMenuId: (id: string | null) => void
   onCommitDraft: () => void
@@ -772,6 +846,16 @@ function EntryTreeRow({
               role="menuitem"
               onClick={() => {
                 onSetMenuId(null)
+                onReveal()
+              }}
+            >
+              Show in folder…
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onSetMenuId(null)
                 onSetDraft({ kind: 'rename-entry', id: entry.id, name: entry.name })
               }}
             >
@@ -851,7 +935,15 @@ function DraftNameRow({
   )
 }
 
-function SheetThumb({ entryId, label }: { entryId: string; label: string }) {
+function SheetThumb({
+  entryId,
+  fileHandle = null,
+  label,
+}: {
+  entryId?: string | null
+  fileHandle?: FileSystemFileHandle | null
+  label: string
+}) {
   const [url, setUrl] = useState<string | null>(null)
   const [hover, setHover] = useState<{ left: number; top: number } | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
@@ -860,22 +952,35 @@ function SheetThumb({ entryId, label }: { entryId: string; label: string }) {
   useEffect(() => {
     let cancelled = false
 
-    async function load() {
-      let blob = await loadEntryThumb(entryId)
-      if (!blob) {
-        try {
-          const handle = await loadFileHandle(entryId)
-          if (!handle) return
-          const query = await handle.queryPermission({ mode: 'read' })
-          if (query !== 'granted') return
-          const file = await handle.getFile()
-          blob = await makeLibraryPreview(file)
-          await storeEntryThumb(entryId, blob)
-        } catch {
-          return
-        }
+    async function loadFromHandle(handle: FileSystemFileHandle) {
+      try {
+        const query = await handle.queryPermission({ mode: 'read' })
+        if (query !== 'granted') return null
+        const file = await handle.getFile()
+        return makeLibraryPreview(file)
+      } catch {
+        return null
       }
-      if (cancelled || !blob) return
+    }
+
+    async function load() {
+      let blob: Blob | null = null
+      if (entryId) {
+        blob = await loadEntryThumb(entryId)
+        if (!blob) {
+          const handle = (await loadFileHandle(entryId)) ?? fileHandle
+          if (handle) {
+            blob = await loadFromHandle(handle)
+            if (blob) await storeEntryThumb(entryId, blob)
+          }
+        }
+      } else if (fileHandle) {
+        blob = await loadFromHandle(fileHandle)
+      }
+      if (cancelled || !blob) {
+        if (!cancelled) setUrl(null)
+        return
+      }
       if (urlRef.current) URL.revokeObjectURL(urlRef.current)
       const next = URL.createObjectURL(blob)
       urlRef.current = next
@@ -886,7 +991,7 @@ function SheetThumb({ entryId, label }: { entryId: string; label: string }) {
 
     function onThumbUpdated(e: Event) {
       const id = (e as CustomEvent<{ entryId: string }>).detail?.entryId
-      if (id === entryId) void load()
+      if (entryId && id === entryId) void load()
     }
     window.addEventListener('paletter-library-thumb', onThumbUpdated)
 
@@ -898,7 +1003,7 @@ function SheetThumb({ entryId, label }: { entryId: string; label: string }) {
         urlRef.current = null
       }
     }
-  }, [entryId])
+  }, [entryId, fileHandle])
 
   function showHover() {
     const el = wrapRef.current

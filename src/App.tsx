@@ -25,6 +25,7 @@ import {
   loadFileHandle,
   loadLibraryMeta,
   makeLibraryPreview,
+  revealLibraryEntry,
   storeEntryThumb,
 } from './lib/library'
 import { createPalette, uid } from './lib/palette'
@@ -407,6 +408,32 @@ export default function App() {
     })
   }
 
+  async function revealLibrarySheet(entry: LibraryEntry) {
+    const result = await revealLibraryEntry(entry.id)
+    if (result === 'ok') return
+    if (result === 'no-handle') {
+      showToast(
+        `No file link for “${entry.name}”. Re-add it after saving.`,
+        'warn',
+        6000,
+      )
+      return
+    }
+    if (result === 'denied') {
+      showToast(`Could not access “${entry.name}”.`, 'error')
+      return
+    }
+    if (result === 'unsupported') {
+      showToast(
+        'This browser can’t open the system folder picker.',
+        'warn',
+        5000,
+      )
+      return
+    }
+    showToast(`Could not show “${entry.name}” in a folder.`, 'error')
+  }
+
   async function addCurrentToLibrary(_folderId: string | null) {
     const result = await handleSave()
     if (result.status === 'cancelled') {
@@ -677,6 +704,7 @@ export default function App() {
         onAddPngToLibrary={addPngFileToLibrary}
         onOpenLibraryEntry={(entry) => void openLibraryEntry(entry)}
         onOpenLibraryFolder={(folderId) => void openLibraryFolder(folderId)}
+        onRevealLibraryEntry={(entry) => void revealLibrarySheet(entry)}
         onLinkedLibraryEntry={(entryId) => {
           setSheets((prev) =>
             prev.map((s) =>
@@ -690,6 +718,8 @@ export default function App() {
         openSheets={sheets.map((s) => ({
           id: s.id,
           label: sheetTabLabel(s),
+          libraryEntryId: s.libraryEntryId,
+          handle: s.handle,
         }))}
         activeSheetId={activeSheetId}
         onSelectSheet={setActiveSheetId}

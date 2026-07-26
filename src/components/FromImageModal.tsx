@@ -471,6 +471,51 @@ export function FromImageModal({
     }
   }
 
+  const handleAddRef = useRef(() => {})
+  const handleCloseRef = useRef(() => {})
+
+  function handleAdd() {
+    const img = imageRef.current
+    const currentPicks = picksRef.current
+    if (!currentPicks.length || !img) return
+    const base = createPalette(
+      fileNameRef.current || 'Image',
+      currentPicks.map((p) => p.hex),
+    )
+    const id = editingIdRef.current ?? base.id
+    onSave({
+      ...base,
+      id,
+      sourceImage: cloneImageData(img),
+      sourcePicks: structuredClone(currentPicks),
+      ...(sourcePathRef.current ? { sourcePath: sourcePathRef.current } : {}),
+    })
+    handleClose()
+  }
+
+  function handleClose() {
+    onClose()
+    setImage(null)
+    setPicks([])
+    setSelected(null)
+    setSortState(null)
+    setError(null)
+    setFileName('Image')
+    setSourcePath(undefined)
+    setView({ fit: 1, zoom: 1, panX: 0, panY: 0 })
+    setHover(null)
+    setTool('pick')
+    setEditingId(null)
+    editingIdRef.current = null
+    spaceHeld.current = false
+    setSpaceDown(false)
+    cropDrag.current = null
+    clearHistory()
+  }
+
+  handleAddRef.current = handleAdd
+  handleCloseRef.current = handleClose
+
   useEffect(() => {
     if (!open) return
 
@@ -482,17 +527,20 @@ export function FromImageModal({
           e.preventDefault()
           return
         }
-        handleClose()
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        handleCloseRef.current()
         return
       }
 
       if (e.key === 'Enter' && !e.isComposing) {
         const t = e.target as HTMLElement | null
         if (t?.tagName === 'SELECT') return
-        if (!imageRef.current || !picksRef.current.length) return
+        // Always consume Enter in this dialog so it can't activate the × close button.
         e.preventDefault()
         e.stopImmediatePropagation()
-        handleAdd()
+        if (!imageRef.current || !picksRef.current.length) return
+        handleAddRef.current()
         return
       }
 
@@ -773,45 +821,6 @@ export function FromImageModal({
       return [...next, ...remaining]
     })
     setSelected(null)
-  }
-
-  function handleAdd() {
-    const img = imageRef.current
-    const currentPicks = picksRef.current
-    if (!currentPicks.length || !img) return
-    const base = createPalette(
-      fileNameRef.current || 'Image',
-      currentPicks.map((p) => p.hex),
-    )
-    const id = editingIdRef.current ?? base.id
-    onSave({
-      ...base,
-      id,
-      sourceImage: cloneImageData(img),
-      sourcePicks: structuredClone(currentPicks),
-      ...(sourcePathRef.current ? { sourcePath: sourcePathRef.current } : {}),
-    })
-    handleClose()
-  }
-
-  function handleClose() {
-    onClose()
-    setImage(null)
-    setPicks([])
-    setSelected(null)
-    setSortState(null)
-    setError(null)
-    setFileName('Image')
-    setSourcePath(undefined)
-    setView({ fit: 1, zoom: 1, panX: 0, panY: 0 })
-    setHover(null)
-    setTool('pick')
-    setEditingId(null)
-    editingIdRef.current = null
-    spaceHeld.current = false
-    setSpaceDown(false)
-    cropDrag.current = null
-    clearHistory()
   }
 
   if (!open) return null
