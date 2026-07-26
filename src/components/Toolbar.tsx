@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { parseHex } from '../lib/palette'
+import type { LibraryEntry } from '../lib/library'
 import type { NamePosition, Palette, SheetLayout } from '../types'
 import { JsonPanel } from './JsonPanel'
+import { LibraryPanel } from './LibraryPanel'
 
 interface ToolbarProps {
   title: string
@@ -21,9 +23,15 @@ interface ToolbarProps {
   /** Ask Layout tab to open with the sheet-title fold expanded. */
   layoutFocus?: 'sheet-title' | null
   onLayoutFocusHandled?: () => void
+  onAddToLibrary: (folderId: string | null) => Promise<{
+    name: string
+    fileName: string
+    handle: FileSystemFileHandle | null
+  } | null>
+  onOpenLibraryEntry: (entry: LibraryEntry) => void
 }
 
-type SideTab = 'add' | 'edit' | 'layout' | 'json'
+type SideTab = 'add' | 'edit' | 'layout' | 'json' | 'library'
 
 function FloppyIcon() {
   return (
@@ -59,6 +67,8 @@ export function Toolbar({
   onEditSlot,
   layoutFocus = null,
   onLayoutFocusHandled,
+  onAddToLibrary,
+  onOpenLibraryEntry,
 }: ToolbarProps) {
   const [tab, setTab] = useState<SideTab>('add')
   const [sheetTitleOpen, setSheetTitleOpen] = useState(true)
@@ -105,6 +115,7 @@ export function Toolbar({
                 ['edit', 'Edit'],
                 ['layout', 'Layout'],
                 ['json', 'JSON'],
+                ['library', 'Library'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -134,7 +145,7 @@ export function Toolbar({
         <div
           className={`side-panel__body ${
             tab === 'edit' && selectedId ? 'side-panel__body--edit-detail' : ''
-          }`}
+          } ${tab === 'library' ? 'side-panel__body--library' : ''}`}
           role="tabpanel"
         >
           {tab === 'add' && (
@@ -207,6 +218,15 @@ export function Toolbar({
               onTitleChange={onTitleChange}
               onLayoutChange={onLayoutChange}
               onPalettesChange={onPalettesChange}
+            />
+          )}
+
+          {tab === 'library' && (
+            <LibraryPanel
+              active={tab === 'library'}
+              onAddCurrent={onAddToLibrary}
+              onOpenEntry={onOpenLibraryEntry}
+              addBusy={saveBusy}
             />
           )}
 

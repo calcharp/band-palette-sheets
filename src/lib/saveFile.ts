@@ -25,16 +25,21 @@ export async function writeBlobToFileHandle(
   await writable.close()
 }
 
+export type SavePngResult =
+  | { status: 'saved'; handle: FileSystemFileHandle }
+  | { status: 'downloaded' }
+  | { status: 'cancelled' }
+  | { status: 'failed'; message: string }
+
 /**
  * Save a PNG blob. Uses the File System Access API when available so a
  * remembered handle can overwrite later; falls back to a download otherwise.
- * Returns the file handle when one was obtained (null on cancel / fallback).
  */
 export async function savePngBlob(
   blob: Blob,
   suggestedName: string,
   existingHandle: FileSystemFileHandle | null,
-): Promise<FileSystemFileHandle | null> {
+): Promise<SavePngResult> {
   const picker =
     typeof window !== 'undefined' && 'showSaveFilePicker' in window
       ? window.showSaveFilePicker.bind(window)
@@ -43,9 +48,12 @@ export async function savePngBlob(
   if (existingHandle) {
     try {
       const perm = await existingHandle.queryPermission({ mode: 'readwrite' })
-      if (perm === 'granted' || (await existingHandle.requestPermission({ mode: 'readwrite' })) === 'granted') {
+      if (
+        perm === 'granted' ||
+        (await existingHandle.requestPermission({ mode: 'readwrite' })) === 'granted'
+      ) {
         await writeBlobToFileHandle(existingHandle, blob)
-        return existingHandle
+        return { status: 'saved', handle: existingHandle }
       }
     } catch {
       // Fall through to pick / download.
@@ -64,13 +72,21 @@ export async function savePngBlob(
         ],
       })
       await writeBlobToFileHandle(handle, blob)
-      return handle
+      return { status: 'saved', handle }
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return existingHandle
-      throw e
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        return { status: 'cancelled' }
+      }
+      return {
+        status: 'failed',
+        message: e instanceof Error ? e.message : 'Could not save file.',
+      }
     }
   }
 
-  triggerDownload(blob, suggestedName.endsWith('.png') ? suggestedName : `${suggestedName}.png`)
-  return null
+  triggerDownload(
+    blob,
+    suggestedName.endsWith('.png') ? suggestedName : `${suggestedName}.png`,
+  )
+  return { status: 'downloaded' }
 }

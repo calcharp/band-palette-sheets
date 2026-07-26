@@ -10,11 +10,13 @@ import { clipboardImageLabel } from './lib/clipboardImage'
 import { useHistory } from './lib/history'
 import { tryImportPaletteSheetPng } from './lib/importSheet'
 import { loadImageFile } from './lib/imagePalette'
+import type { LibraryEntry } from './lib/library'
+import { loadFileHandle } from './lib/library'
 import { createPalette, uid } from './lib/palette'
 import { attachImagePasteListeners } from './lib/pasteImage'
 import { pngBlobWithSheetMeta } from './lib/pngMeta'
 import { renderSheet } from './lib/render'
-import { savePngBlob, suggestedPngFileName } from './lib/saveFile'
+import { savePngBlob, suggestedPngFileName, type SavePngResult } from './lib/saveFile'
 import { DEFAULT_LAYOUT, type Palette, type SheetLayout } from './types'
 
 /** Old paper defaults → white sheet. */
@@ -89,22 +91,30 @@ export default function App() {
     set((d) => ({ ...d, layout: { ...d.layout, background: '#ffffff' } }))
   }, [layout.background, set])
 
-  async function handleSave() {
-    if (saveBusy) return
+  async function handleSave(): Promise<SavePngResult> {
+    if (saveBusy) {
+      return fileHandleRef.current
+        ? { status: 'saved', handle: fileHandleRef.current }
+        : { status: 'cancelled' }
+    }
     setSaveBusy(true)
     try {
       const canvas = renderSheet(palettes, layout, 2, title)
       const raw = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), 'image/png'),
       )
-      if (!raw) return
+      if (!raw) return { status: 'failed', message: 'Could not render sheet.' }
       const blob = await pngBlobWithSheetMeta(raw, palettes, layout, title)
-      const handle = await savePngBlob(
+      const result = await savePngBlob(
         blob,
         suggestedPngFileName(title),
         fileHandleRef.current,
       )
-      if (handle) fileHandleRef.current = handle
+      if (result.status === 'saved') fileHandleRef.current = result.handle
+      if (result.status === 'failed') {
+        showToast(result.message, 'error')
+      }
+      return result
     } finally {
       setSaveBusy(false)
     }
@@ -265,6 +275,57 @@ export default function App() {
     importInputRef.current?.click()
   }
 
+  async function addCurrentToLibrary(_folderId: string | null) {
+    const result = await handleSave()
+    if (result.status === 'cancelled') {
+      showToast('Save the sheet first to add it to the library.', 'warn', 5000)
+      return null
+    }
+    if (result.status === 'failed') return null
+
+    const handle = result.status === 'saved' ? result.handle : fileHandleRef.current
+    const fileName = handle?.name || suggestedPngFileName(title)
+    const name = title.trim() || fileName.replace(/\.png$/i, '') || 'Untitled'
+    return { name, fileName, handle }
+  }
+
+  async function openLibraryEntry(entry: LibraryEntry) {
+    const handle = await loadFileHandle(entry.id)
+    if (!handle) {
+      showToast(
+        'No file link for this reference. Open the PNG manually, or remove and re-add it after saving.',
+        'warn',
+        6000,
+      )
+      return
+    }
+    try {
+      const query = await handle.queryPermission({ mode: 'read' })
+      if (
+        query !== 'granted' &&
+        (await handle.requestPermission({ mode: 'read' })) !== 'granted'
+      ) {
+        showToast('Could not access that file.', 'error')
+        return
+      }
+      const file = await handle.getFile()
+      const sheet = await tryImportPaletteSheetPng(file)
+      if (!sheet) {
+        showToast('That file is not a Paletter sheet PNG.', 'error')
+        return
+      }
+      fileHandleRef.current = handle
+      setSelectedId(null)
+      set({
+        title: sheet.title ?? '',
+        layout: sheet.layout ?? DEFAULT_LAYOUT,
+        palettes: sheet.palettes,
+      })
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not open that sheet.', 'error')
+    }
+  }
+
   return (
     <div className="app">
       <input
@@ -300,6 +361,8 @@ export default function App() {
         onEditSlot={onEditSlot}
         layoutFocus={layoutFocus}
         onLayoutFocusHandled={() => setLayoutFocus(null)}
+        onAddToLibrary={addCurrentToLibrary}
+        onOpenLibraryEntry={(entry) => void openLibraryEntry(entry)}
       />
       <main className="workspace">
         <div className="workspace__stage">
