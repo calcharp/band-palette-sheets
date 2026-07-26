@@ -2,6 +2,10 @@ import { gridDims } from './palette'
 import type { NamePosition, Palette, SheetLayout } from '../types'
 
 export const NAME_FONT = '600 18px "DM Sans", sans-serif'
+/** Fixed line box so names with descenders (e.g. “Clay”) don’t shift bands. */
+const NAME_LINE_HEIGHT = 22
+const NAME_BASELINE = 16
+const HEX_FONT = '500 11px "IBM Plex Mono", monospace'
 const NAME_COLOR = '#1c1917'
 
 /** Relative luminance 0–1 (sRGB). */
@@ -61,7 +65,7 @@ function measureName(ctx: CanvasRenderingContext2D, name: string): { w: number; 
   const m = ctx.measureText(name || ' ')
   return {
     w: Math.ceil(m.width),
-    h: Math.ceil((m.actualBoundingBoxAscent ?? 14) + (m.actualBoundingBoxDescent ?? 4)),
+    h: NAME_LINE_HEIGHT,
   }
 }
 
@@ -105,28 +109,28 @@ function nameOffset(
     case 'above':
       return {
         nameX: (m.contentW - m.nameW) / 2,
-        nameY: m.nameH,
+        nameY: NAME_BASELINE,
         stripeX: (m.contentW - m.stripesW) / 2,
         stripeY: m.nameH + nameGap,
       }
     case 'below':
       return {
         nameX: (m.contentW - m.nameW) / 2,
-        nameY: m.stripesH + nameGap + m.nameH,
+        nameY: m.stripesH + nameGap + NAME_BASELINE,
         stripeX: (m.contentW - m.stripesW) / 2,
         stripeY: 0,
       }
     case 'left':
       return {
         nameX: 0,
-        nameY: (m.contentH + m.nameH) / 2 - m.nameH * 0.15,
+        nameY: (m.contentH - m.nameH) / 2 + NAME_BASELINE,
         stripeX: m.nameW + nameGap,
         stripeY: (m.contentH - m.stripesH) / 2,
       }
     case 'right':
       return {
         nameX: m.stripesW + nameGap,
-        nameY: (m.contentH + m.nameH) / 2 - m.nameH * 0.15,
+        nameY: (m.contentH - m.nameH) / 2 + NAME_BASELINE,
         stripeX: 0,
         stripeY: (m.contentH - m.stripesH) / 2,
       }
@@ -157,8 +161,7 @@ function drawPalette(
 
     if (layout.showHexLabels !== false && layout.bandHeight >= 14) {
       const label = hex.toUpperCase().startsWith('#') ? hex.toUpperCase() : `#${hex.toUpperCase()}`
-      const fontSize = Math.max(9, Math.min(12, Math.floor(layout.bandHeight * 0.42)))
-      ctx.font = `500 ${fontSize}px "IBM Plex Mono", monospace`
+      ctx.font = HEX_FONT
       ctx.fillStyle = contrastInk(hex)
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
@@ -173,11 +176,21 @@ function buildGrid(palettes: Palette[], layout: SheetLayout) {
   const measure = document.createElement('canvas').getContext('2d')
   if (!measure) throw new Error('No canvas context')
 
-  const { cols, rows } = gridDims(palettes.length || 1, layout.columns)
-  const list = palettes.length ? palettes : []
-  const metricsList = (
-    list.length ? list : [{ id: '_', name: 'Empty', colors: ['#ddd'] }]
-  ).map((p) => cellMetrics(measure, p, layout))
+  if (!palettes.length) {
+    return {
+      cols: 1,
+      list: [] as Palette[],
+      metricsList: [] as ReturnType<typeof cellMetrics>[],
+      colWidths: [layout.bandWidth],
+      rowHeights: [layout.bandHeight],
+      gridW: layout.bandWidth,
+      gridH: layout.bandHeight,
+    }
+  }
+
+  const { cols, rows } = gridDims(palettes.length, layout.columns)
+  const list = palettes
+  const metricsList = list.map((p) => cellMetrics(measure, p, layout))
 
   const colWidths = Array.from({ length: cols }, (_, c) => {
     let max = 0
@@ -228,7 +241,8 @@ export function computeSheetHits(
       layout.rowGap * r
     const m = metricsList[i]
     const ox = x + (colWidths[c] - m.contentW) / 2
-    const oy = y + (rowHeights[r] - m.contentH) / 2
+    // Top-align in the row so band tops stay level across columns.
+    const oy = y
     const off = nameOffset(layout.namePosition, m, layout.nameGap)
 
     const name: Rect = {
@@ -382,7 +396,8 @@ export function renderSheet(
       layout.rowGap * r
     const m = metricsList[i]
     const ox = x + (colWidths[c] - m.contentW) / 2
-    const oy = y + (rowHeights[r] - m.contentH) / 2
+    // Top-align in the row so band tops stay level across columns.
+    const oy = y
     drawPalette(ctx, palette, layout, ox, oy, m)
   })
 

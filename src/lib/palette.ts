@@ -143,4 +143,17 @@ export function downloadCanvasJpg(canvas: HTMLCanvasElement, fileName: string, q
   )
 }
 
+/** Lossless PNG download — keeps exact palette colors. */
+export function downloadCanvasPng(canvas: HTMLCanvasElement, fileName: string) {
+  canvas.toBlob((blob) => {
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName.endsWith('.png') ? fileName : `${fileName}.png`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, 'image/png')
+}
+
 export type { SheetLayout, Palette }

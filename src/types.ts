@@ -1,10 +1,21 @@
 export type NamePosition = 'above' | 'below' | 'left' | 'right'
 
+/** Pixel sample from a from-image session (hex + image coordinates). */
+export interface PaletteSourcePick {
+  hex: string
+  x: number
+  y: number
+}
+
 export interface Palette {
   id: string
   name: string
   /** Hex colors like #AABBCC (normalized with leading #). */
   colors: string[]
+  /** Working image when this palette was created/updated via From image. */
+  sourceImage?: ImageData
+  /** Eyedropper picks with positions, matching `colors` when saved from image. */
+  sourcePicks?: PaletteSourcePick[]
 }
 
 export interface SheetLayout {
@@ -38,6 +49,6 @@ export const DEFAULT_LAYOUT: SheetLayout = {
   namePosition: 'above',
   nameGap: 10,
   padding: 48,
-  background: '#f4f0e8',
+  background: '#ffffff',
   showHexLabels: true,
 }

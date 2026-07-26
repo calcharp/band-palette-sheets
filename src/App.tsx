@@ -1,9 +1,10 @@
-import { useState } from 'react'
-import { FromImageModal } from './components/FromImageModal'
+import { useCallback, useEffect, useState } from 'react'
+import { FromImageModal, type FromImageResume } from './components/FromImageModal'
+import { ImportSheetModal } from './components/ImportSheetModal'
 import { SheetPreview } from './components/SheetPreview'
 import { Toolbar } from './components/Toolbar'
 import { useHistory } from './lib/history'
-import { createPalette, downloadCanvasJpg } from './lib/palette'
+import { createPalette, downloadCanvasPng } from './lib/palette'
 import { renderSheet } from './lib/render'
 import { DEFAULT_LAYOUT, type Palette, type SheetLayout } from './types'
 
@@ -12,6 +13,9 @@ const STARTER: Palette[] = [
   createPalette('Clay', ['#7c2d12', '#c2410c', '#fb923c', '#ffedd5']),
   createPalette('Sea', ['#0c4a6e', '#0369a1', '#38bdf8', '#e0f2fe']),
 ]
+
+/** Old paper defaults → white sheet. */
+const LEGACY_SHEET_BG = new Set(['#f4f0e8', '#f7f3eb', '#ebe4d6', '#faf7f1'])
 
 interface DocState {
   palettes: Palette[]
@@ -24,18 +28,63 @@ export default function App() {
     layout: DEFAULT_LAYOUT,
   })
   const { palettes, layout } = present
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [editSlot, setEditSlot] = useState<HTMLDivElement | null>(null)
   const [fromImageOpen, setFromImageOpen] = useState(false)
+  const [fromImageResume, setFromImageResume] = useState<FromImageResume | null>(null)
+  const [importSheetOpen, setImportSheetOpen] = useState(false)
+  const onEditSlot = useCallback((el: HTMLDivElement | null) => {
+    setEditSlot(el)
+  }, [])
+
+  useEffect(() => {
+    const bg = layout.background.trim().toLowerCase()
+    if (!LEGACY_SHEET_BG.has(bg)) return
+    set((d) => ({ ...d, layout: { ...d.layout, background: '#ffffff' } }))
+  }, [layout.background, set])
 
   function handleExport() {
     const canvas = renderSheet(palettes, layout, 2)
-    downloadCanvasJpg(canvas, 'palette-sheet')
+    downloadCanvasPng(canvas, 'palette-sheet')
+  }
+
+  function openFromImage() {
+    setFromImageResume(null)
+    setFromImageOpen(true)
+  }
+
+  function openFromImageResume(palette: Palette) {
+    if (!palette.sourceImage) return
+    setFromImageResume({
+      paletteId: palette.id,
+      name: palette.name,
+      image: palette.sourceImage,
+      picks:
+        palette.sourcePicks ??
+        palette.colors.map((hex, i) => ({ hex, x: i, y: 0 })),
+    })
+    setFromImageOpen(true)
+  }
+
+  function saveFromImage(palette: Palette) {
+    set((d) => {
+      const idx = d.palettes.findIndex((p) => p.id === palette.id)
+      if (idx >= 0) {
+        const next = [...d.palettes]
+        next[idx] = palette
+        return { ...d, palettes: next }
+      }
+      return { ...d, palettes: [...d.palettes, palette] }
+    })
   }
 
   return (
     <div className="app">
       <Toolbar
         layout={layout}
-        paletteCount={palettes.length}
+        palettes={palettes}
+        selectedId={selectedId}
+        onSelectPalette={setSelectedId}
         onLayoutChange={(next) => set((d) => ({ ...d, layout: next }))}
         onAddPalette={() =>
           set((d) => ({
@@ -43,8 +92,10 @@ export default function App() {
             palettes: [...d.palettes, createPalette(`Palette ${d.palettes.length + 1}`)],
           }))
         }
-        onFromImage={() => setFromImageOpen(true)}
+        onFromImage={openFromImage}
+        onImportSheet={() => setImportSheetOpen(true)}
         onExport={handleExport}
+        onEditSlot={onEditSlot}
       />
       <main className="workspace">
         <div className="workspace__stage">
@@ -52,14 +103,27 @@ export default function App() {
             palettes={palettes}
             layout={layout}
             onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
+            selectedId={selectedId}
+            onSelectedIdChange={setSelectedId}
+            editSlot={editSlot}
+            onOpenSourceImage={openFromImageResume}
           />
         </div>
       </main>
 
       <FromImageModal
         open={fromImageOpen}
-        onClose={() => setFromImageOpen(false)}
-        onAdd={(palette) => set((d) => ({ ...d, palettes: [...d.palettes, palette] }))}
+        resume={fromImageResume}
+        onClose={() => {
+          setFromImageOpen(false)
+          setFromImageResume(null)
+        }}
+        onSave={saveFromImage}
+      />
+      <ImportSheetModal
+        open={importSheetOpen}
+        onClose={() => setImportSheetOpen(false)}
+        onAdd={(next) => set((d) => ({ ...d, palettes: [...d.palettes, ...next] }))}
       />
     </div>
   )
