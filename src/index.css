@@ -1043,6 +1043,30 @@ button {
   color: #b91c1c;
 }
 
+.preview__add {
+  position: absolute;
+  z-index: 5;
+  box-sizing: border-box;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(34, 160, 90, 0.55);
+  border-radius: 4px;
+  background: #fff;
+  color: #16a34a;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.preview__add:hover {
+  background: #f0fdf4;
+  border-color: #16a34a;
+  color: #15803d;
+}
+
 .preview__canvas {
   display: block;
   max-width: min(1100px, 100%);

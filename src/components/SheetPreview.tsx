@@ -4,6 +4,7 @@ import { simplifyPalette, type ClusterReduce } from '../lib/imagePalette'
 import { normalizeHex, parseHex, sortColors, type ColorSortKey } from '../lib/palette'
 import {
   cellAtPoint,
+  computeAddPaletteSlot,
   computeSheetHits,
   hitTest,
   movePalette,
@@ -19,6 +20,7 @@ interface SheetPreviewProps {
   palettes: Palette[]
   layout: SheetLayout
   onPalettesChange: (palettes: Palette[]) => void
+  onAddPalette: () => void
   selectedId: string | null
   onSelectedIdChange: (id: string | null) => void
   editSlot: HTMLDivElement | null
@@ -58,6 +60,7 @@ export function SheetPreview({
   palettes,
   layout,
   onPalettesChange,
+  onAddPalette,
   selectedId,
   onSelectedIdChange,
   editSlot,
@@ -78,11 +81,13 @@ export function SheetPreview({
     offsetX: number
     offsetY: number
   } | null>(null)
+  const pendingDeselect = useRef(false)
 
   const [edit, setEdit] = useState<ActiveEdit | null>(null)
   const [displayScale, setDisplayScale] = useState(1)
   const [hits, setHits] = useState<PaletteHit[]>([])
   const [hoverId, setHoverId] = useState<string | null>(null)
+  const [hoverAdd, setHoverAdd] = useState(false)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [sortState, setSortState] = useState<
     Record<string, { key: ColorSortKey; dir: 1 | -1 }>
@@ -141,15 +146,18 @@ export function SheetPreview({
     if (!host) return
     const info = computeSheetHits(displayPalettes, layout)
     setHits(info.hits)
+    const addSlot = computeAddPaletteSlot(displayPalettes, layout)
 
     const dpr = Math.min(3, Math.max(1, window.devicePixelRatio || 1))
     const sheet = renderSheet(displayPalettes, layout, dpr)
-    const logicalW = sheet.width / dpr
-    const logicalH = sheet.height / dpr
+    const sheetW = sheet.width / dpr
+    const sheetH = sheet.height / dpr
+    const logicalW = Math.max(sheetW, addSlot.width)
+    const logicalH = Math.max(sheetH, addSlot.height)
     sheetLogicalRef.current = { w: logicalW, h: logicalH }
 
-    host.width = sheet.width
-    host.height = sheet.height
+    host.width = Math.ceil(logicalW * dpr)
+    host.height = Math.ceil(logicalH * dpr)
     host.style.width = `${logicalW}px`
     host.style.height = `${logicalH}px`
 
@@ -157,9 +165,13 @@ export function SheetPreview({
     if (!ctx) return
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, host.width, host.height)
-    ctx.drawImage(sheet, 0, 0)
 
     // Overlay in layout coordinates (pre-DPR)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.fillStyle = layout.background
+    ctx.fillRect(0, 0, logicalW, logicalH)
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.drawImage(sheet, 0, 0)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     const d = dragRef.current
@@ -217,10 +229,13 @@ export function SheetPreview({
         const sel = info.hits.find((h) => h.paletteId === selectedId)
         if (sel) strokePaletteRing(sel.cell, 'rgba(170, 170, 170, 0.9)')
       }
+      if (hoverAdd) {
+        strokePaletteRing(addSlot.cell, 'rgba(170, 170, 170, 0.55)')
+      }
     }
 
     updateScale()
-  }, [displayPalettes, layout, drag?.overId, drag?.paletteId, selectedId, hoverId])
+  }, [displayPalettes, layout, drag?.overId, drag?.paletteId, selectedId, hoverId, hoverAdd])
 
   useEffect(() => {
     const frame = frameRef.current
@@ -276,6 +291,7 @@ export function SheetPreview({
           pendingDrag.current = null
           if (editRef.current?.kind === 'color') commitEdit()
           setHoverId(null)
+          setHoverAdd(false)
           setDrag(next)
           setEdit(null)
         }
@@ -297,7 +313,9 @@ export function SheetPreview({
     function onUp() {
       const pending = pendingDrag.current
       const d = dragRef.current
+      const shouldDeselect = pendingDeselect.current
       pendingDrag.current = null
+      pendingDeselect.current = false
       if (d) {
         if (d.overId && d.overId !== d.paletteId) {
           onPalettesChange(movePalette(displayPalettes, d.paletteId, d.overId))
@@ -305,7 +323,11 @@ export function SheetPreview({
         setDrag(null)
         return
       }
-      if (pending) selectPalette(pending.paletteId)
+      if (pending) {
+        selectPalette(pending.paletteId)
+        return
+      }
+      if (shouldDeselect) deselectPalette()
     }
 
     window.addEventListener('pointermove', onMove)
@@ -369,7 +391,12 @@ export function SheetPreview({
     const pt = sheetPoint(e)
     if (!pt) return
     const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout)
-    if (!cell) return
+    if (!cell) {
+      pendingDrag.current = null
+      pendingDeselect.current = true
+      return
+    }
+    pendingDeselect.current = false
     pendingDrag.current = {
       paletteId: cell.paletteId,
       index: cell.paletteIndex,
@@ -383,16 +410,28 @@ export function SheetPreview({
   function onCanvasPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
     if (dragRef.current || pendingDrag.current) {
       if (hoverId) setHoverId(null)
+      if (hoverAdd) setHoverAdd(false)
       return
     }
     const pt = sheetPoint(e)
     if (!pt) {
       if (hoverId) setHoverId(null)
+      if (hoverAdd) setHoverAdd(false)
       return
     }
     const cell = cellAtPoint(pt.x, pt.y, displayPalettes, layout)
     const next = cell?.paletteId ?? null
     if (next !== hoverId) setHoverId(next)
+
+    const slot = computeAddPaletteSlot(displayPalettes, layout).cell
+    const pad = 6
+    const overAdd =
+      !next &&
+      pt.x >= slot.x - pad &&
+      pt.x <= slot.x + slot.w + pad &&
+      pt.y >= slot.y - pad &&
+      pt.y <= slot.y + slot.h + pad
+    if (overAdd !== hoverAdd) setHoverAdd(overAdd)
   }
 
   function onDoubleClick(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -451,6 +490,14 @@ export function SheetPreview({
 
   function selectPalette(id: string) {
     onSelectedIdChange(id)
+  }
+
+  function deselectPalette() {
+    if (editRef.current?.kind === 'color') commitEdit()
+    else setEdit(null)
+    onSelectedIdChange(null)
+    setSimplifyLive(false)
+    setHoverId(null)
   }
 
   function sortPalette(id: string, key: ColorSortKey) {
@@ -543,6 +590,21 @@ export function SheetPreview({
           top: (chromeHit.cell.y - ringPad + deleteInset) * displayScale,
           width: deleteBtn,
           height: deleteBtn,
+        }
+      : undefined
+
+  const addSlot = useMemo(
+    () => computeAddPaletteSlot(displayPalettes, layout),
+    [displayPalettes, layout],
+  )
+  const addBtn = 22
+  const addStyle =
+    !drag && hoverAdd && displayScale > 0
+      ? {
+          left: (addSlot.cell.x + addSlot.cell.w / 2) * displayScale - addBtn / 2,
+          top: (addSlot.cell.y + addSlot.cell.h / 2) * displayScale - addBtn / 2,
+          width: addBtn,
+          height: addBtn,
         }
       : undefined
 
@@ -657,7 +719,10 @@ export function SheetPreview({
       <div
         className="preview__frame"
         ref={frameRef}
-        onPointerLeave={() => setHoverId(null)}
+        onPointerLeave={() => {
+          setHoverId(null)
+          setHoverAdd(false)
+        }}
       >
         <canvas
           ref={canvasRef}
@@ -685,6 +750,28 @@ export function SheetPreview({
             }}
           >
             ×
+          </button>
+        )}
+
+        {addStyle && (
+          <button
+            type="button"
+            className="preview__add"
+            style={addStyle}
+            aria-label="Add palette"
+            title="Add palette"
+            onPointerDown={(e) => {
+              e.stopPropagation()
+              e.preventDefault()
+            }}
+            onClick={(e) => {
+              e.stopPropagation()
+              onAddPalette()
+              setHoverAdd(false)
+            }}
+            onPointerEnter={() => setHoverAdd(true)}
+          >
+            +
           </button>
         )}
 

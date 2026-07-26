@@ -284,6 +284,79 @@ export function computeSheetHits(
   }
 }
 
+/**
+ * Grid cell for the next empty palette slot (same columns as the current
+ * sheet — does not reflow existing palettes). Sheet size may grow by a row.
+ */
+export function computeAddPaletteSlot(
+  palettes: Palette[],
+  layout: SheetLayout,
+): { cell: Rect; width: number; height: number } {
+  const measure = document.createElement('canvas').getContext('2d')
+  if (!measure) throw new Error('No canvas context')
+
+  const phantomColors =
+    palettes[palettes.length - 1]?.colors?.length
+      ? palettes[palettes.length - 1]!.colors.map(() => '#e8e8e8')
+      : ['#e8e8e8', '#d4d4d4']
+  const phantom: Palette = { id: '__add__', name: 'Palette', colors: phantomColors }
+  const phantomMetrics = cellMetrics(measure, phantom, layout)
+
+  if (!palettes.length) {
+    const w = phantomMetrics.contentW
+    const h = phantomMetrics.contentH
+    return {
+      cell: { x: layout.padding, y: layout.padding, w, h },
+      width: Math.ceil(w + layout.padding * 2),
+      height: Math.ceil(h + layout.padding * 2),
+    }
+  }
+
+  const { cols, list, colWidths, rowHeights, gridW, gridH } = buildGrid(palettes, layout)
+  const rows = Math.max(1, Math.ceil(list.length / cols))
+  const nextIndex = list.length
+  const c = nextIndex % cols
+  const r = Math.floor(nextIndex / cols)
+
+  let widths = colWidths
+  let heights = rowHeights
+  let nextGridW = gridW
+  let nextGridH = gridH
+
+  if (r >= rows) {
+    heights = [...rowHeights, phantomMetrics.contentH]
+    nextGridH = gridH + layout.rowGap + phantomMetrics.contentH
+  }
+
+  // Column may be unused in earlier rows only when count is small; widen if needed.
+  if (phantomMetrics.contentW > (widths[c] ?? 0)) {
+    widths = [...widths]
+    widths[c] = phantomMetrics.contentW
+    nextGridW =
+      widths.reduce((a, b) => a + b, 0) + layout.colGap * Math.max(0, cols - 1)
+  }
+
+  const x =
+    layout.padding +
+    widths.slice(0, c).reduce((a, b) => a + b, 0) +
+    layout.colGap * c
+  const y =
+    layout.padding +
+    heights.slice(0, r).reduce((a, b) => a + b, 0) +
+    layout.rowGap * r
+
+  return {
+    cell: {
+      x,
+      y,
+      w: widths[c] ?? phantomMetrics.contentW,
+      h: heights[r] ?? phantomMetrics.contentH,
+    },
+    width: Math.ceil(nextGridW + layout.padding * 2),
+    height: Math.ceil(nextGridH + layout.padding * 2),
+  }
+}
+
 export type HitTarget =
   | { kind: 'name'; paletteId: string; rect: Rect }
   | { kind: 'band'; paletteId: string; colorIndex: number; rect: Rect; hex: string }

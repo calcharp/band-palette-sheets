@@ -120,6 +120,12 @@ export default function App() {
             palettes={palettes}
             layout={layout}
             onPalettesChange={(next) => set((d) => ({ ...d, palettes: next }))}
+            onAddPalette={() =>
+              set((d) => ({
+                ...d,
+                palettes: [...d.palettes, createPalette(`Palette ${d.palettes.length + 1}`)],
+              }))
+            }
             selectedId={selectedId}
             onSelectedIdChange={setSelectedId}
             editSlot={editSlot}
